@@ -40,7 +40,7 @@ import xarray as xr
 from dask.diagnostics import ProgressBar
 
 SRC = "/eos/jeodpp/data/base/Meteo/GLOBAL/ECMWF/Reanalysis/ERA5/LATEST/Data/NetCDF"
-DST = "/eos/jeodpp/data/projects/DROUGHTOBS/elisa/ERA5_downscaling/ERA5_daily"
+DST = "/eos/jeodpp/data/projects/DROUGHTOBS/elisa/GCM_downscaling/Input data/ERA5_daily"
 SOURCES = {"pr": ("total_precipitation", "tp"), "tas": ("2m_temperature", "t2m")}
 
 

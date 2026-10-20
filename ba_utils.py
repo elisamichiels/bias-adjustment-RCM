@@ -54,7 +54,7 @@ def find_config(path=None):
                   Path.cwd().parent / f"config_{profile}.json"]
     if profile == "bdap":
         candidates += [Path(p) for p in glob.glob(
-            f"/eos/jeodpp/data/projects/DROUGHTOBS/*/outputs/config_{profile}.json")]
+            f"/eos/jeodpp/data/projects/DROUGHTOBS/*/*/outputs/config_{profile}.json")]
         candidates += [Path(p) for p in glob.glob(
             f"/eos/jeodpp/home/users/*/ba_rcm/outputs/config_{profile}.json")]
     for c in candidates:
