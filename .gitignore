@@ -1,0 +1,15 @@
+# Jupyter / Python
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# Données lourdes
+*.nc
+*.nc4
+*.grib
+*.zarr/
+
+# Système
+.DS_Store
+Thumbs.db
+desktop.ini
