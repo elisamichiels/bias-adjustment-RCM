@@ -49,21 +49,33 @@ def src_file(src, folder, year):
 
 
 def hourly_block(paths, name, start, n_days):
-    """Exactly n_days * 24 hourly steps from `start` (checked: no missing hour), chunked by day."""
-    ds = xr.open_mfdataset([str(p) for p in paths], combine="by_coords", chunks={"valid_time": 24})
+    """
+    Exactly n_days * 24 hourly steps from `start` (checked: no missing hour), in day-aligned dask blocks.
+    Chunked (compressed) files, e.g. tp: each stored block is read once, then regrouped into 28-day blocks
+    on the stored spatial tiles. Contiguous files, e.g. t2m: read one day of the whole globe at a time.
+    """
+    with xr.open_dataset(str(paths[0])) as ds0:
+        stored = ds0[name].encoding.get("chunksizes")
+    if stored:
+        t, la, lo = stored
+        read = {"valid_time": t, "latitude": la, "longitude": lo}
+        blocks = {"valid_time": 24 * 28, "latitude": la, "longitude": lo}
+    else:
+        read = blocks = {"valid_time": 24}
+    ds = xr.open_mfdataset([str(p) for p in paths], combine="by_coords", chunks=read)
     da = ds[name].drop_vars(["expver", "number"], errors="ignore")
     expected = pd.date_range(start, periods=n_days * 24, freq="h")
     da = da.sel(valid_time=slice(expected[0], expected[-1]))
     if da.sizes["valid_time"] != expected.size or not np.array_equal(da.valid_time.values, expected.values):
         raise ValueError(f"{name}: missing hours between {expected[0]} and {expected[-1]} "
                          f"({da.sizes['valid_time']} found, {expected.size} expected)")
-    return da.chunk({"valid_time": 24})
+    return da.chunk(blocks)
 
 
 def to_daily(da, how, days):
     out = getattr(da.coarsen(valid_time=24), how)()
     out = out.rename({"valid_time": "time", "latitude": "lat", "longitude": "lon"})
-    return out.assign_coords(time=days)
+    return out.assign_coords(time=days).chunk({"time": 28, "lat": -1, "lon": -1})   # whole-globe blocks to write
 
 
 def write_job(da, name, units, long_name, method, path):
