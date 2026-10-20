@@ -14,6 +14,7 @@ Contents
 import glob
 import json
 import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")   # BDAP/EOS refuses HDF5 file locks ("NetCDF: HDF error")
 from pathlib import Path
 
 import numpy as np

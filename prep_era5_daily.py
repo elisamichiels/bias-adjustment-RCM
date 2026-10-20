@@ -24,6 +24,7 @@ Years already written are skipped, so the script can be stopped and restarted.
 """
 import argparse
 import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")   # BDAP/EOS refuses HDF5 file locks ("NetCDF: HDF error")
 import sys
 import time
 from pathlib import Path
