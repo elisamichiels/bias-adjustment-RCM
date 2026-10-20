@@ -54,6 +54,8 @@ def find_config(path=None):
                   Path.cwd().parent / f"config_{profile}.json"]
     if profile == "bdap":
         candidates += [Path(p) for p in glob.glob(
+            f"/eos/jeodpp/data/projects/DROUGHTOBS/*/outputs/config_{profile}.json")]
+        candidates += [Path(p) for p in glob.glob(
             f"/eos/jeodpp/home/users/*/ba_rcm/outputs/config_{profile}.json")]
     for c in candidates:
         if c.exists():
@@ -201,8 +203,27 @@ def subset_time(da, start, end):
 
 
 def crop_bbox(da, bbox):
-    """bbox = {'lat': (min, max), 'lon': (min, max)}; da already normalised (ascending lat/lon)."""
+    """bbox = {'lat': (min, max), 'lon': (min, max)}; da already normalised (ascending lat/lon).
+    bbox = None -> no cropping (whole domain)."""
+    if bbox is None:
+        return da
     return da.sel(lat=slice(*bbox["lat"]), lon=slice(*bbox["lon"]))
+
+
+def domain_of(da, margin=0.0):
+    """Lat/lon extent of a (normalised) field, optionally widened by `margin` degrees."""
+    return {"lat": (float(da.lat.min()) - margin, float(da.lat.max()) + margin),
+            "lon": (float(da.lon.min()) - margin, float(da.lon.max()) + margin)}
+
+
+def rcm_domain(cfg, run="rcm_2025_nohosing", margin=0.0):
+    """
+    Domain of the RCM (its own grid extent): there is no hand-made region box in this pipeline.
+    Returns None if the RCM path is not filled in yet (callers then use the whole/global domain).
+    """
+    if not dataset_available(cfg, run, "pr"):
+        return None
+    return domain_of(read_raw(cfg, run, "pr").isel(time=slice(0, 1)), margin)
 
 
 def sub_to(ds, like, tol=1e-3):
@@ -288,9 +309,8 @@ def regrid_conservative(da, dst_lat, dst_lon, min_cover=0.5):
 
 
 def area_mean(da, bbox=None):
-    """Spatial mean weighted by cos(lat)."""
-    if bbox is not None:
-        da = crop_bbox(da, bbox)
+    """Spatial mean weighted by cos(lat) (over `bbox`, or over the whole field if None)."""
+    da = crop_bbox(da, bbox)
     w = np.cos(np.deg2rad(da.lat))
     return da.weighted(w).mean(("lat", "lon"))
 

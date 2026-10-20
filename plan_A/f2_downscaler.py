@@ -14,8 +14,8 @@ def train_f2(coarse, fine, outdir, **kwargs):
     """
     Learn F2 on ERA5 only (synchronised pairs, same day).
 
-    coarse : dict of DataArrays, ERA5 regridded to 1 deg (Europe)   - downscaling input
-    fine   : dict of DataArrays, raw ERA5 0.25 deg (Europe)         - downscaling target
+    coarse : dict of DataArrays, ERA5 regridded to 1 deg (global)   - downscaling input
+    fine   : dict of DataArrays, raw ERA5 0.25 deg (global)         - downscaling target
     outdir : pathlib.Path where to write the learned model (weights, parameters, ...)
 
     To do: train and save into `outdir`. Returns nothing.
@@ -25,11 +25,11 @@ def train_f2(coarse, fine, outdir, **kwargs):
 
 def apply_f2(coarse_sim, outdir, target_lat, target_lon, **kwargs):
     """
-    Apply F2 to a 1 deg dataset (here: GCM 2025 no-hosing 'ERA5-like' 1 deg, Europe).
+    Apply F2 to a 1 deg dataset (here: each GCM run 'ERA5-like' 1 deg, global).
 
     coarse_sim : dict {'pr','tasmax','tasmin'} of 1 deg DataArrays
     outdir     : folder of the model learned by train_f2
-    target_lat, target_lon : coordinates of the ERA5 0.25 deg grid (Europe) to produce
+    target_lat, target_lon : coordinates of the global ERA5 0.25 deg grid to produce
 
     Returns: dict {'pr','tasmax','tasmin'} of DataArrays (time, lat, lon) on the target grid.
     """

@@ -17,8 +17,8 @@ def train_f1(gcm_hist, era5, outdir, **kwargs):
     """
     Learn F1: EC-Earth3 historical (native resolution) -> ERA5 0.25 deg.
 
-    gcm_hist : dict of DataArrays, EC-Earth3 historical at native resolution (~0.7 deg), Europe + small margin
-    era5     : dict of DataArrays, ERA5 0.25 deg (Europe)
+    gcm_hist : dict of DataArrays, EC-Earth3 historical at native resolution (~0.7 deg), global
+    era5     : dict of DataArrays, ERA5 0.25 deg, global
                (both cover the same training period but are NOT paired day by day)
     outdir   : pathlib.Path where to write what was learned (analogue library, parameters, ...)
 
@@ -31,9 +31,9 @@ def apply_f1(gcm_sim, outdir, target_lat, target_lon, **kwargs):
     """
     Apply F1 to a GCM run (native resolution) to obtain an 'ERA5-like' 0.25 deg field.
 
-    gcm_sim : dict {'pr','tasmax','tasmin'} of DataArrays, native GCM (Europe + margin)
+    gcm_sim : dict {'pr','tasmax','tasmin'} of DataArrays, native GCM, global
     outdir  : folder of what was learned by train_f1
-    target_lat, target_lon : coordinates of the ERA5 0.25 deg grid (Europe) to produce
+    target_lat, target_lon : coordinates of the global ERA5 0.25 deg grid to produce
 
     Returns: dict {'pr','tasmax','tasmin'} of DataArrays (time, lat, lon) on the target grid.
     """
