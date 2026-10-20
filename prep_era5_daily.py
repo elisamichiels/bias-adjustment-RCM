@@ -48,22 +48,41 @@ def src_file(src, folder, year):
     return Path(src) / folder / "consolidated" / str(year) / f"{year}_cds_era5_{folder}.nc"
 
 
-def hourly_block(paths, name, start, n_days):
+STD_DIMS = {"time": "valid_time", "lat": "latitude", "lon": "longitude"}   # the BDAP files differ by year
+
+
+def open_one(path, name):
     """
-    Exactly n_days * 24 hourly steps from `start` (checked: no missing hour), in day-aligned dask blocks.
-    Chunked (compressed) files, e.g. tp: each stored block is read once, then regrouped into 28-day blocks
-    on the stored spatial tiles. Contiguous files, e.g. t2m: read one day of the whole globe at a time.
+    Open one hourly file lazily with standard dim names (valid_time, latitude, longitude).
+    Chunked (compressed) files, e.g. tp: dask blocks = stored blocks, so each one is read once.
+    Contiguous files, e.g. t2m: one day of the whole globe at a time.
     """
-    with xr.open_dataset(str(paths[0])) as ds0:
-        stored = ds0[name].encoding.get("chunksizes")
+    with xr.open_dataset(str(path)) as ds0:
+        dims, stored = ds0[name].dims, ds0[name].encoding.get("chunksizes")
     if stored:
-        t, la, lo = stored
-        read = {"valid_time": t, "latitude": la, "longitude": lo}
-        blocks = {"valid_time": 24 * 28, "latitude": la, "longitude": lo}
+        chunks = dict(zip(dims, stored))
     else:
-        read = blocks = {"valid_time": 24}
-    ds = xr.open_mfdataset([str(p) for p in paths], combine="by_coords", chunks=read)
-    da = ds[name].drop_vars(["expver", "number"], errors="ignore")
+        chunks = {d: (24 if STD_DIMS.get(d, d) == "valid_time" else -1) for d in dims}
+    ds = xr.open_dataset(str(path), chunks=chunks)
+    ds = ds.rename({d: s for d, s in STD_DIMS.items() if d in ds.dims or d in ds.coords})
+    da = ds[name]
+    if "expver" in da.dims:                     # ERA5 / ERA5T mix: keep the first non-missing value
+        merged = da.isel(expver=0)
+        for i in range(1, da.sizes["expver"]):
+            merged = merged.fillna(da.isel(expver=i))
+        da = merged
+    da = da.drop_vars(["expver", "number"], errors="ignore")
+    std = {STD_DIMS.get(d, d): c for d, c in chunks.items()}
+    blocks = ({"valid_time": 24 * 28, "latitude": std["latitude"], "longitude": std["longitude"]}
+              if stored else {"valid_time": 24})
+    return da, blocks
+
+
+def hourly_block(paths, name, start, n_days):
+    """Exactly n_days * 24 hourly steps from `start` (checked: no missing hour), in day-aligned dask blocks."""
+    parts = [open_one(p, name) for p in paths]
+    blocks = parts[0][1]
+    da = xr.concat([d for d, _ in parts], dim="valid_time") if len(parts) > 1 else parts[0][0]
     expected = pd.date_range(start, periods=n_days * 24, freq="h")
     da = da.sel(valid_time=slice(expected[0], expected[-1]))
     if da.sizes["valid_time"] != expected.size or not np.array_equal(da.valid_time.values, expected.values):
