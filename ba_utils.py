@@ -79,14 +79,19 @@ def out_dir(cfg, *parts):
     return d
 
 
+def _pattern_files(pattern):
+    """Files matching a pattern or a list of patterns (e.g. NH + SH files); [] if not filled in."""
+    pats = pattern if isinstance(pattern, list) else [pattern]
+    if (not pats) or any((not p) or "TO_FILL" in p for p in pats):
+        return []
+    return sorted(f for p in pats for f in glob.glob(p))
+
+
 def dataset_available(cfg, name, var):
     spec = cfg["datasets"].get(name)
     if not spec:
         return False
-    pat = spec["patterns"].get(var, "")
-    if (not pat) or "TO_FILL" in pat:
-        return False
-    return len(glob.glob(pat)) > 0
+    return len(_pattern_files(spec["patterns"].get(var, ""))) > 0
 
 
 def _first(ds, options):
@@ -150,11 +155,13 @@ def read_raw(cfg, name, var, chunk_time=31, calendar="noleap"):
     """
     spec = cfg["datasets"][name]
     pattern = spec["patterns"].get(var, "")
-    if (not pattern) or "TO_FILL" in pattern:
+    pats = pattern if isinstance(pattern, list) else [pattern]
+    if any((not p) or "TO_FILL" in p for p in pats):
         raise FileNotFoundError(f"{name}/{var}: path not filled in (notebook 00).")
-    files = sorted(glob.glob(pattern))
+    files = _pattern_files(pattern)
     if not files:
         raise FileNotFoundError(f"{name}/{var}: no file matches {pattern}")
+    # several files (time pieces, or NH + SH pieces) are glued along their coordinates
     ds = xr.open_mfdataset(files, combine="by_coords", chunks={"time": chunk_time},
                            parallel=False, **_TIME_KW)
     vname = None
