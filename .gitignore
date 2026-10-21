@@ -19,3 +19,6 @@ desktop.ini
 
 # Outputs of the exploration notebooks (figures, tables, ~1 GB cache)
 001_exploration/outputs/
+
+# Outputs of the validation notebooks (figures, tables)
+plan_B/3_validations/**/outputs/
