@@ -341,17 +341,22 @@ def mask_any(fine, lat_f, lon_f, lat_c, lon_c):
     return (cnt_true > 0).reshape(shape), frac
 
 
-def domain_mask_path(cfg):
-    """LISFLOOD domain on the ERA5 0.25 deg grid, written by notebook 00c (in <out_root>/../extra_files)."""
-    return Path(cfg["out_root"]).parent / "extra_files" / "lisflood_domain_on_ERA5_025.nc"
+DOMAIN_FILES = {"era5": "lisflood_domain_on_ERA5_025.nc",        # ERA5 / GCM ERA5-like 0.25 deg grid
+                "ecearth3": "lisflood_domain_on_EC-Earth3_gr.nc"}   # native EC-Earth3 'gr' grid (all GCM runs)
 
 
-def load_domain_mask(cfg, like=None):
+def domain_mask_path(cfg, grid="era5"):
+    """LISFLOOD domain mask written by notebook 00c (in <out_root>/../extra_files); grid = 'era5' or 'ecearth3'."""
+    return Path(cfg["out_root"]).parent / "extra_files" / DOMAIN_FILES[grid]
+
+
+def load_domain_mask(cfg, grid="era5", like=None):
     """
-    LISFLOOD domain mask (True = inside) on the ERA5 0.25 deg grid, or on the grid of `like`
-    (e.g. native EC-Earth3), transferred with the "at least one" rule (mask_any).
+    LISFLOOD domain mask (True = inside) written by notebook 00c, on the 'era5' or 'ecearth3' grid.
+    With `like`: the mask is checked against (or, if the grids differ, transferred to) the grid of `like`
+    with the "at least one" rule (mask_any).
     """
-    m = xr.open_dataset(domain_mask_path(cfg))["domain"].load() == 1
+    m = xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1
     if like is None or same_grid(m, like):
         return m if like is None else m.assign_coords(lat=like.lat, lon=like.lon)
     mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
