@@ -97,7 +97,7 @@ def dataset_available(cfg, name, var):
 
 def _first(ds, options):
     for o in options:
-        if o in ds.coords or o in ds.dims or o in ds.variables:
+        if o in ds.coords or o in ds.dims or o in getattr(ds, "variables", {}):   # DataArray: no .variables
             return o
     return None
 
@@ -314,6 +314,48 @@ def regrid_conservative(da, dst_lat, dst_lon, min_cover=0.5):
     out = out.assign_coords(lat=dst_lat, lon=dst_lon)
     out.attrs["regrid"] = "conservative (area overlap)"
     return out
+
+
+def mask_any(fine, lat_f, lon_f, lat_c, lon_c):
+    """
+    Transfer a True/False mask from a fine grid to a coarser one with the rule "at least one":
+    a coarse cell is True if at least one fine cell whose CENTRE falls inside it is True.
+    Each fine cell belongs to exactly one coarse cell (cell edges = mid-points between centres,
+    valid for regular and Gaussian grids). Grids: 1-D, ascending latitude, longitude in [-180, 180).
+    Returns (mask, frac) as numpy arrays on the coarse grid; frac = share of the fine cells that are True
+    (NaN where no fine cell falls in the coarse cell).
+    """
+    lat_f, lon_f, lat_c, lon_c = (np.asarray(a, float) for a in (lat_f, lon_f, lat_c, lon_c))
+    ye, xe = _edges(lat_c), _edges(lon_c)
+    iy = np.searchsorted(ye, lat_f) - 1
+    ix = np.searchsorted(xe, ((lon_f - xe[0]) % 360.0) + xe[0]) - 1     # longitude wrap-around
+    iy = np.where((iy >= 0) & (iy < lat_c.size), iy, -1)
+    ix = np.clip(ix, 0, lon_c.size - 1)
+    n = lat_c.size * lon_c.size
+    rows_ok = iy >= 0
+    cnt_all = np.bincount((iy[rows_ok, None] * lon_c.size + ix[None, :]).ravel(), minlength=n)
+    r, c = np.nonzero(np.asarray(fine, bool) & rows_ok[:, None])
+    cnt_true = np.bincount(iy[r] * lon_c.size + ix[c], minlength=n)
+    shape = (lat_c.size, lon_c.size)
+    frac = np.where(cnt_all > 0, cnt_true / np.maximum(cnt_all, 1), np.nan).reshape(shape)
+    return (cnt_true > 0).reshape(shape), frac
+
+
+def domain_mask_path(cfg):
+    """LISFLOOD domain on the ERA5 0.25 deg grid, written by notebook 00c (in <out_root>/../extra_files)."""
+    return Path(cfg["out_root"]).parent / "extra_files" / "lisflood_domain_on_ERA5_025.nc"
+
+
+def load_domain_mask(cfg, like=None):
+    """
+    LISFLOOD domain mask (True = inside) on the ERA5 0.25 deg grid, or on the grid of `like`
+    (e.g. native EC-Earth3), transferred with the "at least one" rule (mask_any).
+    """
+    m = xr.open_dataset(domain_mask_path(cfg))["domain"].load() == 1
+    if like is None or same_grid(m, like):
+        return m if like is None else m.assign_coords(lat=like.lat, lon=like.lon)
+    mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
+    return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat, "lon": like.lon}, name="domain")
 
 
 def area_mean(da, bbox=None):
