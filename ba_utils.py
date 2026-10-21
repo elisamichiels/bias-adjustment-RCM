@@ -351,12 +351,44 @@ def mask_any(fine, lat_f, lon_f, lat_c, lon_c):
     return (cnt_true > 0).reshape(shape), frac
 
 
+def dilate(mask, n=1):
+    """Grow a (lat, lon) True/False mask by n pixels in every direction (8 neighbours), periodic in longitude."""
+    m = np.asarray(mask, bool)
+    for _ in range(n):
+        out = m.copy()
+        for dx in (-1, 0, 1):
+            s = np.roll(m, dx, axis=1)                  # longitude: wrap-around
+            out |= s
+            out[1:] |= s[:-1]                           # latitude: no wrap-around
+            out[:-1] |= s[1:]
+        m = out
+    return m
+
+
+def mask_footprint(coarse, lat_c, lon_c, lat_f, lon_f):
+    """
+    Footprint of a coarse-grid mask on a fine grid: a fine cell is True if its CENTRE falls in a True coarse cell.
+    (Inverse of mask_any: e.g. the EC-Earth3 mask applied to ERA5, so that both cover exactly the same area.)
+    """
+    ye, xe = _edges(np.asarray(lat_c, float)), _edges(np.asarray(lon_c, float))
+    iy = np.searchsorted(ye, np.asarray(lat_f, float)) - 1
+    ix = np.clip(np.searchsorted(xe, ((np.asarray(lon_f, float) - xe[0]) % 360.0) + xe[0]) - 1, 0, len(lon_c) - 1)
+    ok = (iy >= 0) & (iy < len(lat_c))
+    out = np.zeros((len(lat_f), len(lon_f)), bool)
+    out[ok] = np.asarray(coarse, bool)[iy[ok]][:, ix]
+    return out
+
+
 DOMAIN_FILES = {"era5": "lisflood_domain_on_ERA5_025.nc",        # ERA5 / GCM ERA5-like 0.25 deg grid
-                "ecearth3": "lisflood_domain_on_EC-Earth3_gr.nc"}   # native EC-Earth3 'gr' grid (all GCM runs)
+                "ecearth3": "lisflood_domain_on_EC-Earth3_gr.nc",   # native EC-Earth3 'gr' grid (all GCM runs)
+                # with a 0.25 deg buffer (for a downscaling restricted to land + coastal margin):
+                "era5_buffer": "lisflood_domain_buffer_on_ERA5_025.nc",
+                "ecearth3_buffer": "lisflood_domain_buffer_on_EC-Earth3_gr.nc",
+                "ecearth3_buffer_on_era5": "lisflood_domain_buffer_EC-Earth3_footprint_on_ERA5_025.nc"}
 
 
 def domain_mask_path(cfg, grid="era5"):
-    """LISFLOOD domain mask written by notebook 00c (in <out_root>/../extra_files); grid = 'era5' or 'ecearth3'."""
+    """LISFLOOD domain mask written by notebook 00c (in <out_root>/../extra_files); grid = a key of DOMAIN_FILES."""
     return Path(cfg["out_root"]).parent / "extra_files" / DOMAIN_FILES[grid]
 
 
