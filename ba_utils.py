@@ -373,17 +373,18 @@ def load_domain_mask(cfg, grid="era5", like=None):
     return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat, "lon": like.lon}, name="domain")
 
 
-GISCO_URL = "https://gisco-services.ec.europa.eu/distribution/v2/countries/geojson/CNTR_BN_{res}_2020_4326.geojson"
+GISCO_URL = "https://gisco-services.ec.europa.eu/distribution/v2/countries/geojson/CNTR_BN_{res}_2020_4326_COASTL.geojson"
 
 
 def borders(cfg, res="01M"):
     """
-    Country borders AND coastlines (Eurostat GISCO 'CNTR_BN', 2020, EPSG:4326 lon/lat) for the map overlays,
+    Coastlines only, i.e. the land / sea limit, no administrative borders (Eurostat GISCO 'CNTR_BN ... COASTL', 2020,
+    EPSG:4326 lon/lat) for the map overlays,
     as a list of (N, 2) lon/lat arrays. res = '01M' (finest, 1:1 million), '03M', '10M', '20M' or '60M'.
     The GeoJSON file is downloaded once into extra_files/ (next to the domain masks). Returns None if unavailable.
     """
     import json, urllib.request
-    path = domain_mask_path(cfg).parent / f"CNTR_BN_{res}_2020_4326.geojson"
+    path = domain_mask_path(cfg).parent / f"CNTR_BN_{res}_2020_4326_COASTL.geojson"
     if not path.exists():
         try:
             print(f"downloading {path.name} (GISCO, once) ...")
@@ -397,7 +398,7 @@ def borders(cfg, res="01M"):
                 urllib.request.urlretrieve(GISCO_URL.format(res=res), tmp)
             tmp.replace(path)
         except Exception as exc:
-            print(f"  borders not available ({type(exc).__name__}: {exc}): maps without borders")
+            print(f"  coastlines not available ({type(exc).__name__}: {exc}): maps without coastlines")
             return None
     gj = json.loads(path.read_text(encoding="utf-8"))
     segs = []
@@ -419,7 +420,7 @@ def borders(cfg, res="01M"):
 
 
 def draw_borders(ax, segs, color="k", lw=0.25, transform=None):
-    """Overlay borders / coastlines (from `borders`) on a lon/lat map without changing its limits."""
+    """Overlay the coastlines (from `borders`) on a lon/lat map without changing its limits."""
     if not segs:
         return
     from matplotlib.collections import LineCollection
