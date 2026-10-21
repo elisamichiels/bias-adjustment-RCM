@@ -88,11 +88,11 @@ def _pattern_files(pattern):
     return sorted(f for p in pats for f in glob.glob(p))
 
 
-EXPLO_ROOT = Path.home() / "001_exploration" / "outputs"   # private (home), outside git and outside EOS
+EXPLO_ROOT = Path(__file__).resolve().parent / "001_exploration" / "outputs"   # in the repository folder, ignored by git
 
 
 def explo_dir(*parts):
-    """Output folder of the exploration notebooks: ~/001_exploration/outputs/<parts> (created if needed)."""
+    """Output folder of the exploration notebooks: <repository>/001_exploration/outputs/<parts> (created if needed)."""
     d = EXPLO_ROOT.joinpath(*parts)
     d.mkdir(parents=True, exist_ok=True)
     return d

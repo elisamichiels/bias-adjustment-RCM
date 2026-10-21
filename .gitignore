@@ -16,3 +16,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Outputs of the exploration notebooks (figures, tables, ~1 GB cache)
+001_exploration/outputs/
