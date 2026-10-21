@@ -142,6 +142,10 @@ def _std_units(var, da):
         else:
             print(f"  [!] unknown pr units '{u0}': assumed mm/day")
         da.attrs["units"] = "mm/d"
+    elif var == "rsds":
+        if u not in ("wm-2", "w/m2", "wm**-2", "w/m^2", "wm^-2"):
+            print(f"  [!] unknown rsds units '{u0}': assumed W m-2")
+        da.attrs["units"] = "W m-2"
     else:
         if u in ("k", "kelvin"):
             da = da - 273.15
