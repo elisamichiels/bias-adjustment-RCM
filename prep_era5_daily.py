@@ -1,9 +1,10 @@
 """
-prep_era5_daily.py - build DAILY ERA5 (pr, tasmax, tasmin) from the HOURLY ERA5 copy on BDAP.
+prep_era5_daily.py - build DAILY ERA5 (pr, tasmax, tasmin, rsds) from the HOURLY ERA5 copy on BDAP.
 
 Source (one file per year and per variable, global 0.25 deg, hourly):
   <src>/total_precipitation/consolidated/<year>/<year>_cds_era5_total_precipitation.nc   (tp, m)
   <src>/2m_temperature/consolidated/<year>/<year>_cds_era5_2m_temperature.nc             (t2m, K)
+  <src>/surface_solar_radiation_downwards/consolidated/<year>/...                        (ssrd, J m-2, from 2005 only)
 Only the 'consolidated' files are used (the 'nrt' near-real-time files are ignored).
 
 Daily values (UTC days, same definition as the CDS "ERA5 post-processed daily statistics", 1-hourly):
@@ -11,15 +12,19 @@ Daily values (UTC days, same definition as the CDS "ERA5 post-processed daily st
            is the accumulation over the previous hour), x 1000 -> mm/day, small negative values clipped to 0
   tasmax = max of the 24 hourly t2m values from D 00:00 to D 23:00, - 273.15 -> degC
   tasmin = min of the same 24 values
+  rsds   = sum of the 24 hourly ssrd accumulations valid from D 01:00 to D+1 00:00 (like tp), / 86400
+           -> daily mean surface downwelling shortwave radiation in W m-2 (CMIP6 'rsds' units)
 Note: tasmax/tasmin from hourly t2m slightly underestimate the extremes compared with ERA5 mx2t/mn2t.
 
 Output (one file per year and per variable; names match the 'era5' pattern of notebook 00):
-  <dst>/pr_ERA5_day_<year>.nc, <dst>/tasmax_ERA5_day_<year>.nc, <dst>/tasmin_ERA5_day_<year>.nc
+  <dst>/pr_ERA5_day_<year>.nc, <dst>/tasmax_ERA5_day_<year>.nc, <dst>/tasmin_ERA5_day_<year>.nc,
+  <dst>/rsds_ERA5_day_<year>.nc
   original grid (lat 90..-90, lon 0..359.75): ba_utils.read_raw normalises it when reading.
 
 Usage (JEO-lab terminal, from the repository folder):
   python prep_era5_daily.py --start 1981 --end 1981                  # test on one year first
   nohup python prep_era5_daily.py --start 1981 --end 2025 > era5_daily.log 2>&1 &
+  nohup python prep_era5_daily.py --start 2005 --end 2020 --vars rsds > era5_rsds.log 2>&1 &   # radiation
 Years already written are skipped, so the script can be stopped and restarted.
 """
 import argparse
@@ -42,7 +47,8 @@ from dask.diagnostics import ProgressBar
 
 SRC = "/eos/jeodpp/data/base/Meteo/GLOBAL/ECMWF/Reanalysis/ERA5/LATEST/Data/NetCDF"
 DST = "/eos/jeodpp/data/projects/DROUGHTOBS/elisa/GCM_downscaling/Input_data/ERA5_daily"
-SOURCES = {"pr": ("total_precipitation", "tp"), "tas": ("2m_temperature", "t2m")}
+SOURCES = {"pr": ("total_precipitation", "tp"), "tas": ("2m_temperature", "t2m"),
+           "rsds": ("surface_solar_radiation_downwards", "ssrd")}
 
 
 def src_file(src, folder, year):
@@ -107,20 +113,32 @@ def write_job(da, name, units, long_name, method, path):
     return tmp, da.to_dataset().to_netcdf(tmp, encoding=enc, compute=False)
 
 
+def accumulated_daily(src, key, year, days):
+    """Daily sum of an hourly ERA5 accumulation (valid D 01:00 .. D+1 00:00), or None if a file is missing."""
+    folder, name = SOURCES[key]
+    cur, nxt = src_file(src, folder, year), src_file(src, folder, year + 1)
+    if not (cur.exists() and nxt.exists()):
+        print(f"  [skip {key} {year}] needs {cur.name} and {nxt.name} (31 Dec ends at {year + 1}-01-01 00:00)")
+        return None
+    return to_daily(hourly_block([cur, nxt], name, f"{year}-01-01 01:00", days.size), "sum", days)
+
+
 def do_year(year, src, dst, which):
     days = pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")
     jobs = []
     if "pr" in which:
-        folder, name = SOURCES["pr"]
-        cur, nxt = src_file(src, folder, year), src_file(src, folder, year + 1)
-        if not (cur.exists() and nxt.exists()):
-            print(f"  [skip pr {year}] needs {cur.name} and {nxt.name} (31 Dec ends at {year + 1}-01-01 00:00)")
-        else:
-            tp = hourly_block([cur, nxt], name, f"{year}-01-01 01:00", days.size)
-            pr = (to_daily(tp, "sum", days) * 1000.0).clip(min=0.0)
-            jobs.append(write_job(pr, "pr", "mm/d", "daily precipitation",
+        tp = accumulated_daily(src, "pr", year, days)
+        if tp is not None:
+            jobs.append(write_job((tp * 1000.0).clip(min=0.0), "pr", "mm/d", "daily precipitation",
                                   "sum of hourly tp valid D 01:00 .. D+1 00:00 (UTC), x1000, clipped at 0",
                                   dst / f"pr_ERA5_day_{year}.nc"))
+    if "rsds" in which:
+        ssrd = accumulated_daily(src, "rsds", year, days)
+        if ssrd is not None:
+            jobs.append(write_job((ssrd / 86400.0).clip(min=0.0), "rsds", "W m-2",
+                                  "surface downwelling shortwave radiation (daily mean)",
+                                  "sum of hourly ssrd (J m-2) valid D 01:00 .. D+1 00:00 (UTC), / 86400, clipped at 0",
+                                  dst / f"rsds_ERA5_day_{year}.nc"))
     if "tas" in which:
         folder, name = SOURCES["tas"]
         cur = src_file(src, folder, year)
@@ -148,8 +166,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start", type=int, required=True)
     ap.add_argument("--end", type=int, required=True)
-    ap.add_argument("--vars", nargs="+", default=["pr", "tas"], choices=["pr", "tas"],
-                    help="pr = precipitation, tas = tasmax + tasmin")
+    ap.add_argument("--vars", nargs="+", default=["pr", "tas"], choices=["pr", "tas", "rsds"],
+                    help="pr = precipitation, tas = tasmax + tasmin, rsds = solar radiation (ERA5 ssrd: from 2005)")
     ap.add_argument("--src", default=SRC)
     ap.add_argument("--dst", default=DST)
     ap.add_argument("--overwrite", action="store_true")
@@ -158,7 +176,8 @@ def main():
     dst.mkdir(parents=True, exist_ok=True)
     for year in range(a.start, a.end + 1):
         outs = {"pr": [dst / f"pr_ERA5_day_{year}.nc"],
-                "tas": [dst / f"tasmax_ERA5_day_{year}.nc", dst / f"tasmin_ERA5_day_{year}.nc"]}
+                "tas": [dst / f"tasmax_ERA5_day_{year}.nc", dst / f"tasmin_ERA5_day_{year}.nc"],
+                "rsds": [dst / f"rsds_ERA5_day_{year}.nc"]}
         which = [v for v in a.vars if a.overwrite or not all(p.exists() for p in outs[v])]
         if not which:
             print(f"{year}: already done")
