@@ -199,7 +199,17 @@ def scores(x, ref):
     cov = float((w * (xs - mx) * (rs - mr)).sum()) / ws
     return {"bias": mx - mr, "RMSE": float(np.sqrt(float((w * (xs - rs) ** 2).sum()) / ws)),
             "corr": cov / np.sqrt(vx * vr) if vx > 0 and vr > 0 else np.nan,
-            "sd ratio": np.sqrt(vx / vr) if vr > 0 else np.nan}
+            "sd ratio": np.sqrt(vx / vr) if vr > 0 else np.nan, "sd diff": np.sqrt(vx) - np.sqrt(vr)}
+
+
+def scores_no_pairing(x, ref):
+    """
+    Components of the RMSE that do not need any correspondence between x and ref (RMSE^2 = bias^2 + (sd_x - sd_ref)^2
+    + 2 sd_x sd_ref (1 - r)): mean bias and spatial variability (sd ratio, sd difference). Used against ERA5, as the
+    analogue downscaling is not paired with ERA5; RMSE and r are kept for downscaled vs raw.
+    """
+    sc = scores(x, ref)
+    return {"bias": sc["bias"], "sd ratio": sc["sd ratio"], "sd diff": sc["sd diff"]}
 
 
 def regression(x, y):

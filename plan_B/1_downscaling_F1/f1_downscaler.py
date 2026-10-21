@@ -8,8 +8,9 @@ No WDF, no QDM, no regridding: the analogue method does not require day-by-day c
 between EC-Earth3 and ERA5.
 
 Data convention
-  - dict {'pr', 'tasmax', 'tasmin'} -> xarray.DataArray (time, lat, lon)
-  - pr in mm/day, temperatures in degC, ascending lat, lon in [-180, 180)
+  - dict {'pr', 'tasmax', 'tasmin'} (+ 'rsds' when available) -> xarray.DataArray (time, lat, lon)
+  - rsds (W m-2) may cover a SHORTER period than the other variables (ERA5 radiation from 2005)
+  - pr in mm/day, temperatures in degC, rsds in W m-2, ascending lat, lon in [-180, 180)
 """
 
 
