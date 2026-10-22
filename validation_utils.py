@@ -1,5 +1,5 @@
 """
-validation_utils.py - helpers shared by the plan B validation notebooks (3_validations/...).
+validation_utils.py - helpers shared by the validation / verification notebooks (plan_B/3_validations, GCM_BA/4_verification).
 
 Same conventions as the exploration notebook (001_exploration/01_exploration):
   - statistics of a dataset computed once and cached: monthly climatology, yearly means, yearly extremes,

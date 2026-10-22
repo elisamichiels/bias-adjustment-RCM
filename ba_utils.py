@@ -98,6 +98,13 @@ def explo_dir(*parts):
     return d
 
 
+def gcm_ba_dir(cfg, *parts):
+    """Data folders of the GCM bias adjustment: <GCM_downscaling>/GCM_BA/<parts> (next to Input_data; created if needed)."""
+    d = Path(cfg["out_root"]).parent.joinpath("GCM_BA", *parts)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def dataset_available(cfg, name, var):
     spec = cfg["datasets"].get(name)
     if not spec:
@@ -206,6 +213,9 @@ def read_raw(cfg, name, var, chunk_time=31, calendar="noleap"):
     da, u0 = _std_units(var, da)
     if orig_cal != calendar:
         da = da.convert_calendar(calendar, dim="time")
+    # daily values: one timestamp per day at 00:00 (CMIP models stamp days at 12:00, ERA5 at 00:00), so that
+    # all datasets share identical time coordinates (required by xsdba to train ref against hist)
+    da = da.assign_coords(time=da.indexes["time"].floor("D"))
     da = da.chunk({"time": chunk_time, "lat": -1, "lon": -1})
     da.name = var
     da.attrs.update({"orig_units": u0, "orig_calendar": orig_cal, "dataset": name,
@@ -402,11 +412,11 @@ def load_domain_mask(cfg, grid="era5", like=None):
     With `like`: the mask is checked against (or, if the grids differ, transferred to) the grid of `like`
     with the "at least one" rule (mask_any).
     """
-    m = xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1
+    m = (xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1).reset_coords(drop=True)   # lat / lon only
     if like is None or same_grid(m, like):
-        return m if like is None else m.assign_coords(lat=like.lat, lon=like.lon)
+        return m if like is None else m.assign_coords(lat=like.lat.values, lon=like.lon.values)
     mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
-    return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat, "lon": like.lon}, name="domain")
+    return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat.values, "lon": like.lon.values}, name="domain")
 
 
 GISCO_URL = "https://gisco-services.ec.europa.eu/distribution/v2/countries/geojson/CNTR_BN_{res}_2020_4326_COASTL.geojson"
@@ -555,14 +565,19 @@ def wdf_apply(pr, par, seed=SEED_WDF, thr=THRESH_PR):
 
 
 def _as_keys(d):
-    """{'pr','tasmax','tasmin'} -> {'pr','tasmax','dtr'}."""
+    """{'pr','tasmax','tasmin'(,'rsds')} -> {'pr','tasmax','dtr'(,'rsds')}."""
     dtr = (d["tasmax"] - d["tasmin"]).clip(min=DTR_MIN)
     dtr.attrs["units"] = "K"
     tx = d["tasmax"].copy()
     tx.attrs["units"] = "degC"
     pr = d["pr"].copy()
     pr.attrs["units"] = "mm/d"
-    return {"pr": pr, "tasmax": tx, "dtr": dtr}
+    out = {"pr": pr, "tasmax": tx, "dtr": dtr}
+    if "rsds" in d:
+        rs = d["rsds"].copy()
+        rs.attrs["units"] = "W m-2"
+        out["rsds"] = rs
+    return out
 
 
 def _prep(x, chunks_space):
@@ -575,8 +590,11 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=
         pr     : fixed WDF, then multiplicative QDM (wet days only)
         tasmax : additive QDM
         dtr    : multiplicative QDM (tasmin = adjusted tasmax - adjusted dtr)
-    ref, hist : dict {'pr','tasmax','tasmin'} of DataArrays (time, lat, lon), same grids.
-    Writes the parameters to outdir (wdf_params.nc, qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc).
+        rsds   : additive QDM, clipped at 0 when applied (optional: only if present in both ref and hist;
+                 additive because multiplicative QDM fails on the zeros of the polar night)
+    ref, hist : dict {'pr','tasmax','tasmin'(,'rsds')} of DataArrays (time, lat, lon), same grids.
+                Each variable may cover its own period (e.g. rsds shorter: ERA5 radiation from 2005).
+    Writes the parameters to outdir (wdf_params.nc, qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc (, qdm_rsds.nc)).
     """
     from dask.diagnostics import ProgressBar
     from xsdba.adjustment import QuantileDeltaMapping
@@ -584,9 +602,19 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     R, H = _as_keys(ref), _as_keys(hist)
+    if ("rsds" in R) != ("rsds" in H):
+        R.pop("rsds", None); H.pop("rsds", None)
+        print("rsds missing in ref or hist: not adjusted")
     for k in R:
         if not same_grid(R[k], H[k]):
             raise ValueError(f"{k}: ref and hist are not on the same grid.")
+        # xsdba trains ref against hist on identical time arrays: same days required (hours ignored)
+        dr, dh = R[k].indexes["time"].floor("D"), H[k].indexes["time"].floor("D")
+        if len(dr) != len(dh) or not (dr == dh).all():
+            raise ValueError(f"{k}: ref and hist do not cover the same days ({len(dr)} vs {len(dh)} days, "
+                             f"{dr[0]} .. {dr[-1]} vs {dh[0]} .. {dh[-1]}): use the same calibration period.")
+        R[k] = R[k].assign_coords(time=dr)
+        H[k] = H[k].assign_coords(time=dr)
     pb = ProgressBar() if progress else None
 
     def _compute_save(ds, path):
@@ -611,6 +639,8 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=
     jobs = {"pr": ("*", pr_r_w, pr_h_w),
             "tasmax": ("+", _prep(R["tasmax"], chunks_space), _prep(H["tasmax"], chunks_space)),
             "dtr": ("*", _prep(R["dtr"], chunks_space), _prep(H["dtr"], chunks_space))}
+    if "rsds" in R:
+        jobs["rsds"] = ("+", _prep(R["rsds"], chunks_space), _prep(H["rsds"], chunks_space))
     for k, (kind, r, h) in jobs.items():
         print(f"QDM {k} (kind '{kind}', {nquantiles} quantiles, per month)")
         q = QuantileDeltaMapping.train(r, h, nquantiles=nquantiles, group="time.month", kind=kind)
@@ -652,7 +682,13 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF):
     dtr_a = q.adjust(_prep(S["dtr"], chunks_space), extrapolation="constant", interp="linear")
     out["tasmax"] = tx_a.transpose("time", "lat", "lon")
     out["tasmin"] = (tx_a - dtr_a).transpose("time", "lat", "lon")
-    for k, unit in (("pr", "mm/d"), ("tasmax", "degC"), ("tasmin", "degC")):
+    units = [("pr", "mm/d"), ("tasmax", "degC"), ("tasmin", "degC")]
+    if "rsds" in S and (Fdir / "qdm_rsds.nc").exists():
+        q = _load_q("rsds")
+        rs_a = q.adjust(_prep(S["rsds"], chunks_space), extrapolation="constant", interp="linear")
+        out["rsds"] = rs_a.clip(min=0.0).transpose("time", "lat", "lon")
+        units.append(("rsds", "W m-2"))
+    for k, unit in units:
         out[k].name = k
         out[k].attrs = {"units": unit}
         out[k] = out[k].drop_vars([c for c in out[k].coords if c not in ("time", "lat", "lon")])
