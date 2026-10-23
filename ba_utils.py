@@ -25,7 +25,7 @@ import xarray as xr
 # --------------------------------------------------------------------------
 THRESH_PR = 0.1      # mm/day: below this value = dry day
 DTR_MIN = 0.1        # degC: floor of the diurnal temperature range (tasmax - tasmin)
-NQUANTILES = 50      # number of QDM quantiles
+NQUANTILES = 100     # number of QDM quantiles (100: the xsdba 'nearest' adjustment is within ~0.02 degC of 'linear')
 SEED_WDF = 20250101  # FIXED WDF seed (same rule for every run)
 
 
@@ -99,10 +99,27 @@ def explo_dir(*parts):
 
 
 def gcm_ba_dir(cfg, *parts):
-    """Data folders of the GCM bias adjustment: <GCM_downscaling>/GCM_BA/<parts> (next to Input_data; created if needed)."""
-    d = Path(cfg["out_root"]).parent.joinpath("GCM_BA", *parts)
+    """Output folders of the GCM bias adjustment: <gcm_ba_root>/<parts> (created if needed).
+    gcm_ba_root comes from the config (BDAP: .../elisa/GCM_BA); older configs: <out_root>/../../GCM_BA."""
+    root = cfg.get("gcm_ba_root") or Path(cfg["out_root"]).parent.parent / "GCM_BA"
+    d = Path(root).joinpath(*parts)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+GCM_BA_ERA5 = "era5_on_ecearth3grid"   # ERA5 regridded onto the EC-Earth3 grid with CDO (dataset of the config)
+
+
+def gcm_ba_available(cfg, name, var):
+    return dataset_available(cfg, GCM_BA_ERA5 if name == "era5" else name, var)
+
+
+def gcm_ba_input(cfg, name, var, period=None):
+    """Input of the GCM bias adjustment, read directly from the input files and standardised by read_raw
+    (degC, mm/day, 'noleap', days at 00:00, pr NH + SH glued): name = 'era5' (ERA5 regridded onto the EC-Earth3
+    grid with CDO), 'gcm_historical' or a GCM run. period = (start, end), None = the whole file."""
+    da = read_raw(cfg, GCM_BA_ERA5 if name == "era5" else name, var)
+    return da if period is None else subset_time(da, *period)
 
 
 def dataset_available(cfg, name, var):
@@ -565,14 +582,23 @@ def wdf_apply(pr, par, seed=SEED_WDF, thr=THRESH_PR):
 
 
 def _as_keys(d):
-    """{'pr','tasmax','tasmin'(,'rsds')} -> {'pr','tasmax','dtr'(,'rsds')}."""
-    dtr = (d["tasmax"] - d["tasmin"]).clip(min=DTR_MIN)
-    dtr.attrs["units"] = "K"
-    tx = d["tasmax"].copy()
-    tx.attrs["units"] = "degC"
-    pr = d["pr"].copy()
-    pr.attrs["units"] = "mm/d"
-    out = {"pr": pr, "tasmax": tx, "dtr": dtr}
+    """{'pr','tasmax','tasmin'(,'rsds')} -> {'pr','tasmax','dtr'(,'rsds')}, for the variables present
+    (tasmin goes through dtr, so it needs tasmax)."""
+    if "tasmin" in d and "tasmax" not in d:
+        raise ValueError("tasmin is adjusted through DTR = tasmax - tasmin: tasmax is needed too.")
+    out = {}
+    if "pr" in d:
+        pr = d["pr"].copy()
+        pr.attrs["units"] = "mm/d"
+        out["pr"] = pr
+    if "tasmax" in d:
+        tx = d["tasmax"].copy()
+        tx.attrs["units"] = "degC"
+        out["tasmax"] = tx
+    if "tasmin" in d:
+        dtr = (d["tasmax"] - d["tasmin"]).clip(min=DTR_MIN)
+        dtr.attrs["units"] = "K"
+        out["dtr"] = dtr
     if "rsds" in d:
         rs = d["rsds"].copy()
         rs.attrs["units"] = "W m-2"
@@ -584,18 +610,28 @@ def _prep(x, chunks_space):
     return x.chunk({"time": -1, **chunks_space})
 
 
-def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=True):
+def _month(x, m):
+    """Days of calendar month m."""
+    return x.isel(time=np.flatnonzero(x.time.dt.month.values == m))
+
+
+def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=True, overwrite=False):
     """
-    Train a correction function F = WDF (pr) + QDM, per month and per pixel:
+    Train a correction function F = WDF (pr) + QDM, per month and per pixel (QDM: one xsdba training per calendar
+    month, without grouping inside the month, so that apply_F can interpolate linearly between the quantiles of each
+    month without blending consecutive months):
         pr     : fixed WDF, then multiplicative QDM (wet days only)
         tasmax : additive QDM
         dtr    : multiplicative QDM (tasmin = adjusted tasmax - adjusted dtr)
         rsds   : additive QDM, clipped at 0 when applied (optional: only if present in both ref and hist;
                  additive because multiplicative QDM fails on the zeros of the polar night)
     ref, hist : dict {'pr','tasmax','tasmin'(,'rsds')} of DataArrays (time, lat, lon), same grids.
+                Any subset of the variables can be given (tasmin needs tasmax), e.g. {'pr'} for a first test.
                 Each variable may cover its own period (e.g. rsds shorter: ERA5 radiation from 2005).
     Writes the parameters to outdir (wdf_params.nc, qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc (, qdm_rsds.nc)).
+    overwrite=False: parameter files already in outdir are kept (not recomputed).
     """
+    import time
     from dask.diagnostics import ProgressBar
     from xsdba.adjustment import QuantileDeltaMapping
     chunks_space = chunks_space or {"lat": 30, "lon": 60}
@@ -618,74 +654,99 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=
     pb = ProgressBar() if progress else None
 
     def _compute_save(ds, path):
+        t0 = time.time()
         if pb:
             with pb:
                 ds = ds.compute()
         else:
             ds = ds.compute()
         ds.to_netcdf(path)
+        print(f"   {path.name} written in {(time.time() - t0) / 60:.1f} min")
         return ds
 
-    # --- WDF
-    print("WDF: estimating the rule (once)")
-    pr_r = _prep(R["pr"], chunks_space)
-    pr_h = _prep(H["pr"], chunks_space)
-    par = _compute_save(wdf_fit(pr_r, pr_h), outdir / "wdf_params.nc")
-    pr_h_w = _prep(_wet_only(wdf_apply(pr_h, par)), chunks_space)
-    pr_r_w = _prep(_wet_only(pr_r), chunks_space)
-    pr_h_w.attrs["units"] = pr_r_w.attrs["units"] = "mm/d"
+    def _done(path):
+        if path.exists() and not overwrite:
+            print(f"   [already done] {path.name}")
+            return True
+        return False
 
-    # --- QDM
-    jobs = {"pr": ("*", pr_r_w, pr_h_w),
-            "tasmax": ("+", _prep(R["tasmax"], chunks_space), _prep(H["tasmax"], chunks_space)),
-            "dtr": ("*", _prep(R["dtr"], chunks_space), _prep(H["dtr"], chunks_space))}
-    if "rsds" in R:
-        jobs["rsds"] = ("+", _prep(R["rsds"], chunks_space), _prep(H["rsds"], chunks_space))
-    for k, (kind, r, h) in jobs.items():
-        print(f"QDM {k} (kind '{kind}', {nquantiles} quantiles, per month)")
-        q = QuantileDeltaMapping.train(r, h, nquantiles=nquantiles, group="time.month", kind=kind)
-        _compute_save(q.ds, outdir / f"qdm_{k}.nc")
+    KIND = {"pr": "*", "tasmax": "+", "dtr": "*", "rsds": "+"}
+    jobs = {}
+    # --- WDF (pr only), then pr QDM on wet days
+    if "pr" in R:
+        print("WDF: estimating the rule (once)")
+        pr_r = _prep(R["pr"], chunks_space)
+        pr_h = _prep(H["pr"], chunks_space)
+        wpath = outdir / "wdf_params.nc"
+        par = xr.open_dataset(wpath).load() if _done(wpath) else _compute_save(wdf_fit(pr_r, pr_h), wpath)
+        pr_h_w = _prep(_wet_only(wdf_apply(pr_h, par)), chunks_space)
+        pr_r_w = _prep(_wet_only(pr_r), chunks_space)
+        pr_h_w.attrs["units"] = pr_r_w.attrs["units"] = "mm/d"
+        jobs["pr"] = (pr_r_w, pr_h_w)
+    for k in ("tasmax", "dtr", "rsds"):
+        if k in R:
+            jobs[k] = (_prep(R[k], chunks_space), _prep(H[k], chunks_space))
+
+    # --- QDM: one xsdba training per calendar month
+    for k, (r, h) in jobs.items():
+        print(f"QDM {k} (kind '{KIND[k]}', {nquantiles} quantiles, one training per month)")
+        path = outdir / f"qdm_{k}.nc"
+        if not _done(path):
+            per_month = [QuantileDeltaMapping.train(_month(r, m), _month(h, m), nquantiles=nquantiles, group="time",
+                                                    kind=KIND[k]).ds for m in range(1, 13)]
+            _compute_save(xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13)), path)
     print("Parameters written to", outdir)
 
 
-def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF):
+def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear"):
     """
-    Apply F (trained by fit_F) to a run `sim` = dict {'pr','tasmax','tasmin'}.
-    Returns a dict of adjusted DataArrays (lazy).
+    Apply F (trained by fit_F) to a run `sim` = dict {'pr','tasmax','tasmin'(,'rsds')}, or a subset of it
+    (tasmin needs tasmax). Returns a dict of adjusted DataArrays (lazy).
+    QDM: xsdba QuantileDeltaMapping.adjust (extrapolation 'constant'), month by month with that month's training:
+    each value is ranked within its month and gets the correction of that rank.
+    interp: 'linear' = linear between the quantiles (as in Cannon et al. 2015) | 'nearest' = nearest quantile (faster).
     """
     from xsdba.adjustment import QuantileDeltaMapping
     chunks_space = chunks_space or {"lat": 30, "lon": 60}
     Fdir = Path(Fdir)
     S = _as_keys(sim)
-    par = xr.open_dataset(Fdir / "wdf_params.nc").load()
-    out = {}
+    like = next(iter(S.values()))
+    out, units = {}, []
 
-    pr_d = wdf_apply(_prep(S["pr"], chunks_space), par, seed=seed)      # dry days = 0
-    pr_w = _prep(_wet_only(pr_d), chunks_space)                         # dry days = NaN
-    pr_w.attrs["units"] = "mm/d"
-    def _load_q(k):
-        qd = sub_to(xr.open_dataset(Fdir / f"qdm_{k}.nc").load(), S["pr"])
-        return QuantileDeltaMapping.from_dataset(qd)
+    def _adjust(k, x):
+        """xsdba QDM adjustment of x, month by month with that month's training (see fit_F)."""
+        qd = sub_to(xr.open_dataset(Fdir / f"qdm_{k}.nc").drop_vars("hist_q_raw", errors="ignore").load(), like)
+        if "month" not in qd.dims:
+            raise ValueError(f"{Fdir / f'qdm_{k}.nc'}: old F format (one training grouped by month): rerun fit_F.")
+        parts = [QuantileDeltaMapping.from_dataset(qd.sel(month=m, drop=True)).adjust(
+                     _month(x, m), extrapolation="constant", interp=interp)
+                 for m in range(1, 13) if (x.time.dt.month == m).any()]
+        return xr.concat(parts, dim="time").sortby("time")
 
-    q = _load_q("pr")
-    pr_a = q.adjust(pr_w, extrapolation="constant", interp="linear")
-    # wet days: QDM (>= threshold); dry days: 0; if the QDM could not correct a value (no wet days
-    # in the training data at this pixel/month) the WDF value is kept.
-    pr_a = pr_a.transpose(*pr_d.dims)
-    out["pr"] = xr.where(pr_d.isnull(), np.nan,
-                         xr.where(pr_d < THRESH_PR, 0.0,
-                                  xr.where(pr_a.isnull(), pr_d, pr_a.clip(min=THRESH_PR))))
+    if "pr" in S:
+        par = xr.open_dataset(Fdir / "wdf_params.nc").load()
+        pr_d = wdf_apply(_prep(S["pr"], chunks_space), par, seed=seed)      # dry days = 0
+        pr_w = _prep(_wet_only(pr_d), chunks_space)                         # dry days = NaN
+        pr_w.attrs["units"] = "mm/d"
+        pr_a = _adjust("pr", pr_w)
+        # wet days: QDM (>= threshold); dry days: 0; if the QDM could not correct a value (no wet days
+        # in the training data at this pixel/month) the WDF value is kept.
+        pr_a = pr_a.transpose(*pr_d.dims)
+        out["pr"] = xr.where(pr_d.isnull(), np.nan,
+                             xr.where(pr_d < THRESH_PR, 0.0,
+                                      xr.where(pr_a.isnull(), pr_d, pr_a.clip(min=THRESH_PR))))
+        units.append(("pr", "mm/d"))
 
-    q = _load_q("tasmax")
-    tx_a = q.adjust(_prep(S["tasmax"], chunks_space), extrapolation="constant", interp="linear")
-    q = _load_q("dtr")
-    dtr_a = q.adjust(_prep(S["dtr"], chunks_space), extrapolation="constant", interp="linear")
-    out["tasmax"] = tx_a.transpose("time", "lat", "lon")
-    out["tasmin"] = (tx_a - dtr_a).transpose("time", "lat", "lon")
-    units = [("pr", "mm/d"), ("tasmax", "degC"), ("tasmin", "degC")]
+    if "tasmax" in S:
+        tx_a = _adjust("tasmax", _prep(S["tasmax"], chunks_space))
+        out["tasmax"] = tx_a.transpose("time", "lat", "lon")
+        units.append(("tasmax", "degC"))
+        if "dtr" in S:
+            dtr_a = _adjust("dtr", _prep(S["dtr"], chunks_space))
+            out["tasmin"] = (tx_a - dtr_a).transpose("time", "lat", "lon")
+            units.append(("tasmin", "degC"))
     if "rsds" in S and (Fdir / "qdm_rsds.nc").exists():
-        q = _load_q("rsds")
-        rs_a = q.adjust(_prep(S["rsds"], chunks_space), extrapolation="constant", interp="linear")
+        rs_a = _adjust("rsds", _prep(S["rsds"], chunks_space))
         out["rsds"] = rs_a.clip(min=0.0).transpose("time", "lat", "lon")
         units.append(("rsds", "W m-2"))
     for k, unit in units:
@@ -750,7 +811,7 @@ def check_environment():
     """Print which required Python packages are available (call at the top of a notebook)."""
     import importlib
     missing = []
-    for mod in ["numpy", "pandas", "xarray", "dask", "netCDF4", "cftime", "matplotlib", "scipy", "xsdba"]:
+    for mod in ["numpy", "pandas", "xarray", "dask", "netCDF4", "cftime", "matplotlib", "scipy", "bottleneck", "xsdba"]:
         try:
             m = importlib.import_module(mod)
             print(f"  ok       {mod:11s} {getattr(m, '__version__', '')}")
