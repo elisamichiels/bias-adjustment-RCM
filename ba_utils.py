@@ -26,6 +26,7 @@ import xarray as xr
 THRESH_PR = 0.1      # mm/day: below this value = dry day
 DTR_MIN = 0.1        # degC: floor of the diurnal temperature range (tasmax - tasmin)
 NQUANTILES = 100     # number of QDM quantiles (100: the xsdba 'nearest' adjustment is within ~0.02 degC of 'linear')
+NQUANTILES_PR = 50   # pr (wet days): fewer quantiles, so that the last one (99%) is estimated on enough wet days
 SEED_WDF = 20250101  # FIXED WDF seed (same rule for every run)
 
 
@@ -619,7 +620,8 @@ def _month(x, m):
     return x.isel(time=np.flatnonzero(x.time.dt.month.values == m))
 
 
-def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=True, overwrite=False):
+def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantiles_pr=NQUANTILES_PR, progress=True,
+          overwrite=False):
     """
     Train a correction function F = WDF (pr) + QDM, per month and per pixel (QDM: one xsdba training per calendar
     month, without grouping inside the month, so that apply_F can interpolate linearly between the quantiles of each
@@ -693,22 +695,27 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, progress=
 
     # --- QDM: one xsdba training per calendar month
     for k, (r, h) in jobs.items():
-        print(f"QDM {k} (kind '{KIND[k]}', {nquantiles} quantiles, one training per month)")
+        nq = nquantiles_pr if k == "pr" else nquantiles
+        print(f"QDM {k} (kind '{KIND[k]}', {nq} quantiles, one training per month)")
         path = outdir / f"qdm_{k}.nc"
         if not _done(path):
-            per_month = [QuantileDeltaMapping.train(_month(r, m), _month(h, m), nquantiles=nquantiles, group="time",
+            per_month = [QuantileDeltaMapping.train(_month(r, m), _month(h, m), nquantiles=nq, group="time",
                                                     kind=KIND[k]).ds for m in range(1, 13)]
             _compute_save(xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13)), path)
     print("Parameters written to", outdir)
 
 
-def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear"):
+def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tail="additive"):
     """
     Apply F (trained by fit_F) to a run `sim` = dict {'pr','tasmax','tasmin'(,'rsds')}, or a subset of it
     (tasmin needs tasmax). Returns a dict of adjusted DataArrays (lazy).
     QDM: xsdba QuantileDeltaMapping.adjust (extrapolation 'constant'), month by month with that month's training:
     each value is ranked within its month and gets the correction of that rank.
     interp: 'linear' = linear between the quantiles (as in Cannon et al. 2015) | 'nearest' = nearest quantile (faster).
+    pr_tail: 'additive' = wet days above the model's last historical quantile (hq, per pixel and month) are corrected by
+      adding the difference at that quantile, x - hq + ref (ref = ERA5's last quantile), instead of x * ref / hq:
+      constant extrapolation of the correction for new extremes (cf. Themessl et al. 2012), which avoids multiplying
+      values far beyond the calibration range by large factors | None = multiplicative everywhere (plain QDM).
     """
     from xsdba.adjustment import QuantileDeltaMapping
     chunks_space = chunks_space or {"lat": 30, "lon": 60}
@@ -717,14 +724,24 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear"):
     like = next(iter(S.values()))
     out, units = {}, []
 
-    def _adjust(k, x):
-        """xsdba QDM adjustment of x, month by month with that month's training (see fit_F)."""
+    def _adjust(k, x, tail=None):
+        """xsdba QDM adjustment of x, month by month with that month's training (see fit_F);
+        tail='additive': values above the last historical quantile hq get x - hq + ref instead."""
         qd = sub_to(xr.open_dataset(Fdir / f"qdm_{k}.nc").drop_vars("hist_q_raw", errors="ignore").load(), like)
         if "month" not in qd.dims:
             raise ValueError(f"{Fdir / f'qdm_{k}.nc'}: old F format (one training grouped by month): rerun fit_F.")
-        parts = [QuantileDeltaMapping.from_dataset(qd.sel(month=m, drop=True)).adjust(
-                     _month(x, m), extrapolation="constant", interp=interp)
-                 for m in range(1, 13) if (x.time.dt.month == m).any()]
+        parts = []
+        for m in range(1, 13):
+            if not (x.time.dt.month == m).any():
+                continue
+            qm, xm = qd.sel(month=m, drop=True), _month(x, m)
+            a = QuantileDeltaMapping.from_dataset(qm).adjust(xm, extrapolation="constant", interp=interp)
+            if tail == "additive":
+                last = lambda v: v.isel(quantiles=-1, drop=True).squeeze(drop=True)   # (lat, lon)
+                hq = last(qm["hist_q"])
+                ref = hq * last(qm["af"])
+                a = xr.where(xm > hq, xm - hq + ref, a.transpose(*xm.dims))
+            parts.append(a)
         return xr.concat(parts, dim="time").sortby("time")
 
     if "pr" in S:
@@ -732,7 +749,7 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear"):
         pr_d = wdf_apply(_prep(S["pr"], chunks_space), par, seed=seed)      # dry days = 0
         pr_w = _prep(_wet_only(pr_d), chunks_space)                         # dry days = NaN
         pr_w.attrs["units"] = "mm/d"
-        pr_a = _adjust("pr", pr_w)
+        pr_a = _adjust("pr", pr_w, tail=pr_tail)
         # wet days: QDM (>= threshold); dry days: 0; if the QDM could not correct a value (no wet days
         # in the training data at this pixel/month) the WDF value is kept.
         pr_a = pr_a.transpose(*pr_d.dims)
