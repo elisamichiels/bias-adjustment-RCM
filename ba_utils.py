@@ -119,6 +119,10 @@ def gcm_ba_input(cfg, name, var, period=None):
     (degC, mm/day, 'noleap', days at 00:00, pr NH + SH glued): name = 'era5' (ERA5 regridded onto the EC-Earth3
     grid with CDO), 'gcm_historical' or a GCM run. period = (start, end), None = the whole file."""
     da = read_raw(cfg, GCM_BA_ERA5 if name == "era5" else name, var)
+    if name == "era5":   # same EC-Earth3 grid (checked by notebook 1): identical coordinate values, so that xarray aligns them
+        grid = read_raw(cfg, "gcm_historical", "tasmax")
+        if same_grid(da, grid):
+            da = da.assign_coords(lat=grid.lat.values, lon=grid.lon.values)
     return da if period is None else subset_time(da, *period)
 
 

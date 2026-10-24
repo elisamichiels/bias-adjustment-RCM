@@ -130,6 +130,77 @@ def compute_stats(d, path=None, overwrite=False, n_sample=3000, label=""):
     return ds
 
 
+def _cached(path, overwrite, label, build):
+    """Read `path` if it exists (and not overwrite), otherwise compute build() (a lazy Dataset) and write it."""
+    if path is not None and path.exists() and not overwrite:
+        return xr.open_dataset(path).load()
+    print(f"-> computing {label}")
+    with ProgressBar():
+        ds = build().compute()
+    if path is not None:
+        ds.to_netcdf(path)
+    return ds
+
+
+def monthly_quantiles(d, path=None, overwrite=False, qs=(0.5, 0.9, 0.99), chunks_space=None, label=""):
+    """Per-pixel quantiles of each calendar month (pr: wet days >= THRESH_PR only), dims (month, quantile, lat, lon).
+    QDM is trained per month and per pixel: in calibration the adjusted run should reproduce these quantiles of ERA5."""
+    cs = chunks_space or {"lat": 32, "lon": 64}
+
+    def build():
+        out = {}
+        for v, x in d.items():
+            x = x.where(x >= bu.THRESH_PR) if v == "pr" else x
+            out[v] = x.chunk({"time": -1, **cs}).groupby("time.month").quantile(list(qs), dim="time")
+        return xr.Dataset(out)
+    return _cached(path, overwrite, f"the monthly quantiles of {label or path}", build)
+
+
+def daily_climatology(d, path=None, overwrite=False, label=""):
+    """Per-pixel mean annual cycle, one value per day of the year ('noleap': 365 days)."""
+    return _cached(path, overwrite, f"the daily climatology of {label or path}",
+                   lambda: xr.Dataset({v: x.groupby("time.dayofyear").mean() for v, x in d.items()}))
+
+
+MONTH_START = np.cumsum([0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30])   # index of the 1st day of each month ('noleap')
+
+
+def month_steps(corr, n=5):
+    """
+    corr: daily climatology of a correction (dayofyear, lat, lon). Step at each change of month (12 boundaries, Dec -> Jan
+    included): mean of the n first days of the new month minus mean of the n last days of the old one. Reference: the
+    same between two consecutive n-day blocks inside the months (days 6-10 -> 11-15 and 16-20 -> 21-25).
+    Returns (steps at the boundaries (boundary, lat, lon), steps inside the months (block, lat, lon)).
+    """
+    c = corr.transpose("dayofyear", "lat", "lon").values
+    ends = np.r_[MONTH_START[1:], 365]
+    at = [c[MONTH_START[(m + 1) % 12]:MONTH_START[(m + 1) % 12] + n].mean(0) - c[ends[m] - n:ends[m]].mean(0)
+          for m in range(12)]
+    inside = [c[s + a + n:s + a + 2 * n].mean(0) - c[s + a:s + a + n].mean(0) for s in MONTH_START for a in (5, 15)]
+    mk = lambda arr, dim: xr.DataArray(np.array(arr), dims=(dim, "lat", "lon"),
+                                       coords={dim: np.arange(len(arr)), "lat": corr.lat, "lon": corr.lon})
+    return mk(at, "boundary"), mk(inside, "block")
+
+
+def pr_amplification(adj, raw, path=None, overwrite=False, wet=1.0, big=5.0, label=""):
+    """Per pixel, over the wet days of the raw run (>= `wet` mm/day): number of wet days, share multiplied by more
+    than `big` by the adjustment (%), largest factor, largest raw and adjusted values."""
+    def build():
+        isw = raw >= wet
+        ratio = (adj / raw).where(isw)
+        n = isw.sum("time")
+        return xr.Dataset({"n_wet": n, "frac_big": 100 * (ratio > big).sum("time") / n.where(n > 0),
+                           "max_factor": ratio.max("time"), "raw_max": raw.max("time"), "adj_max": adj.max("time")})
+    return _cached(path, overwrite, f"the pr amplification of {label or path}", build)
+
+
+def land_stats(da, q=95):
+    """Area-weighted mean and (unweighted) q-th percentile of da over the domain."""
+    m = mask_for(da)
+    vals = da.where(m).values
+    return float(dmean(da)), float(np.nanpercentile(vals[np.isfinite(vals)], q))
+
+
 def regrid_stats(ds, grid, path=None, overwrite=False):
     """Conservative regridding of the gridded statistics onto `grid` (pooled quantiles copied unchanged)."""
     if path is not None and path.exists() and not overwrite:
