@@ -26,8 +26,15 @@ import xarray as xr
 THRESH_PR = 0.1      # mm/day: below this value = dry day
 DTR_MIN = 0.1        # degC: floor of the diurnal temperature range (tasmax - tasmin)
 NQUANTILES = 100     # number of QDM quantiles (100: the xsdba 'nearest' adjustment is within ~0.02 degC of 'linear')
-NQUANTILES_PR = 50   # pr (wet days): fewer quantiles, so that the last one (99%) is estimated on enough wet days
+NQUANTILES_PR = 50   # pr with the WDF (wet days only): fewer quantiles, so that the last one (99%) uses enough wet days
 SEED_WDF = 20250101  # FIXED WDF seed (same rule for every run)
+SEED_JITTER = 20251026  # seed of the dry-day noise of pr_method="jitter" (reproducible results)
+CAL_WINDOW_MONTHS = 3   # QDM of month m trained on the days of the CAL_WINDOW_MONTHS months centred on m (Cannon et al.
+                        # 2015: "sliding 3-month windows centered on the month of interest"), applied to month m only
+PR_METHOD = "jitter"    # dry days of pr: "jitter" = values < THRESH_PR replaced by a uniform noise in (0, THRESH_PR) before
+                        # a multiplicative QDM on all days, set back to 0 after (Cannon et al. 2015) | "wdf" = fixed WDF
+                        # (frequency adaptation) + QDM on wet days only
+F1_VARIANT = f"w{CAL_WINDOW_MONTHS}m-{PR_METHOD}"   # tag of the F1 version, used in the folder and file names
 
 
 # --------------------------------------------------------------------------
@@ -620,13 +627,35 @@ def _month(x, m):
     return x.isel(time=np.flatnonzero(x.time.dt.month.values == m))
 
 
+def _months(x, months):
+    """Days of the calendar months `months`."""
+    return x.isel(time=np.flatnonzero(np.isin(x.time.dt.month.values, months)))
+
+
+def _window(m, n):
+    """The n (odd) calendar months centred on month m, e.g. _window(1, 3) = [12, 1, 2]."""
+    return [(m - 1 + d) % 12 + 1 for d in range(-(n // 2), n // 2 + 1)]
+
+
+def _jitter_dry(x, seed):
+    """Cannon et al. (2015): values < THRESH_PR (dry days, trace amounts) replaced by a uniform noise in (0, THRESH_PR),
+    so that quantile mapping can be applied to all days; xsdba.processing.jitter_under_thresh, reproducible noise."""
+    import dask.array as dsa
+    from xsdba.processing import jitter_under_thresh
+    x = x.copy()
+    x.attrs["units"] = "mm/d"
+    dsa.random.seed(seed)
+    return jitter_under_thresh(x, f"{THRESH_PR} mm/d")
+
+
 def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantiles_pr=NQUANTILES_PR, progress=True,
-          overwrite=False):
+          overwrite=False, window_months=CAL_WINDOW_MONTHS, pr_method=PR_METHOD):
     """
-    Train a correction function F = WDF (pr) + QDM, per month and per pixel (QDM: one xsdba training per calendar
-    month, without grouping inside the month, so that apply_F can interpolate linearly between the quantiles of each
-    month without blending consecutive months):
-        pr     : fixed WDF, then multiplicative QDM (wet days only)
+    Train a correction function F = QDM per calendar month and per pixel (+ WDF for pr if pr_method="wdf"). One xsdba
+    training per month m (no grouping inside it, so that apply_F interpolates linearly between the quantiles), on the
+    days of the `window_months` months centred on m (Cannon et al. 2015; 1 = month m only):
+        pr     : pr_method "jitter" (Cannon et al. 2015): values < THRESH_PR jittered in (0, THRESH_PR), multiplicative
+                 QDM on all days | "wdf": fixed WDF, then multiplicative QDM on wet days only
         tasmax : additive QDM
         dtr    : multiplicative QDM (tasmin = adjusted tasmax - adjusted dtr)
         rsds   : additive QDM, clipped at 0 when applied (optional: only if present in both ref and hist;
@@ -634,7 +663,8 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
     ref, hist : dict {'pr','tasmax','tasmin'(,'rsds')} of DataArrays (time, lat, lon), same grids.
                 Any subset of the variables can be given (tasmin needs tasmax), e.g. {'pr'} for a first test.
                 Each variable may cover its own period (e.g. rsds shorter: ERA5 radiation from 2005).
-    Writes the parameters to outdir (wdf_params.nc, qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc (, qdm_rsds.nc)).
+    Writes the parameters to outdir (qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc (, qdm_rsds.nc), wdf_params.nc for "wdf"),
+    with the method in their attributes (window_months, pr_method).
     overwrite=False: parameter files already in outdir are kept (not recomputed).
     """
     import time
@@ -678,8 +708,12 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
 
     KIND = {"pr": "*", "tasmax": "+", "dtr": "*", "rsds": "+"}
     jobs = {}
-    # --- WDF (pr only), then pr QDM on wet days
-    if "pr" in R:
+    # --- pr: jitter of the dry days (Cannon et al. 2015), or WDF then QDM on wet days
+    if "pr" in R and pr_method == "jitter":
+        print(f"pr: values < {THRESH_PR} mm/day jittered (Cannon et al. 2015), QDM on all days")
+        jobs["pr"] = (_prep(_jitter_dry(R["pr"], SEED_JITTER), chunks_space),
+                      _prep(_jitter_dry(H["pr"], SEED_JITTER + 1), chunks_space))
+    elif "pr" in R:
         print("WDF: estimating the rule (once)")
         pr_r = _prep(R["pr"], chunks_space)
         pr_h = _prep(H["pr"], chunks_space)
@@ -693,15 +727,18 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
         if k in R:
             jobs[k] = (_prep(R[k], chunks_space), _prep(H[k], chunks_space))
 
-    # --- QDM: one xsdba training per calendar month
+    # --- QDM: one xsdba training per calendar month m, on the window_months months centred on m
     for k, (r, h) in jobs.items():
-        nq = nquantiles_pr if k == "pr" else nquantiles
-        print(f"QDM {k} (kind '{KIND[k]}', {nq} quantiles, one training per month)")
+        nq = nquantiles_pr if (k == "pr" and pr_method == "wdf") else nquantiles
+        print(f"QDM {k} (kind '{KIND[k]}', {nq} quantiles, month m trained on the {window_months} months centred on m)")
         path = outdir / f"qdm_{k}.nc"
         if not _done(path):
-            per_month = [QuantileDeltaMapping.train(_month(r, m), _month(h, m), nquantiles=nq, group="time",
-                                                    kind=KIND[k]).ds for m in range(1, 13)]
-            _compute_save(xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13)), path)
+            per_month = [QuantileDeltaMapping.train(_months(r, _window(m, window_months)), _months(h, _window(m, window_months)),
+                                                    nquantiles=nq, group="time", kind=KIND[k]).ds for m in range(1, 13)]
+            ds = xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13))
+            ds.attrs.update({"window_months": window_months,
+                             **({"pr_method": pr_method, "thresh_pr": THRESH_PR} if k == "pr" else {})})
+            _compute_save(ds, path)
     print("Parameters written to", outdir)
 
 
@@ -712,10 +749,11 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
     QDM: xsdba QuantileDeltaMapping.adjust (extrapolation 'constant'), month by month with that month's training:
     each value is ranked within its month and gets the correction of that rank.
     interp: 'linear' = linear between the quantiles (as in Cannon et al. 2015) | 'nearest' = nearest quantile (faster).
-    pr_tail: 'additive' = wet days above the model's last historical quantile (hq, per pixel and month) are corrected by
-      adding the difference at that quantile, x - hq + ref (ref = ERA5's last quantile), instead of x * ref / hq:
-      constant extrapolation of the correction for new extremes (cf. Themessl et al. 2012), which avoids multiplying
-      values far beyond the calibration range by large factors | None = multiplicative everywhere (plain QDM).
+    pr_tail: 'additive' = pr values above the model's last historical quantile (hq, per pixel and month) are corrected
+      by adding the difference at that quantile, x - hq + ref (ref = ERA5's last quantile), instead of x * ref / hq: the
+      "constant correction" of Boe et al. (2007) for values outside the calibration range (cited by Cannon et al. 2015),
+      which avoids multiplying such values by large factors | None = multiplicative everywhere (plain QDM).
+    pr: the dry-day treatment is the one of the training (attribute pr_method of qdm_pr.nc; "wdf" for older files).
     """
     from xsdba.adjustment import QuantileDeltaMapping
     chunks_space = chunks_space or {"lat": 30, "lon": 60}
@@ -725,17 +763,20 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
     out, units = {}, []
 
     def _adjust(k, x, tail=None):
-        """xsdba QDM adjustment of x, month by month with that month's training (see fit_F);
+        """xsdba QDM adjustment of x, month by month with that month's training (see fit_F): as in the training, the
+        values are ranked within the window_months months centred on m (Cannon et al. 2015), and only month m is kept;
         tail='additive': values above the last historical quantile hq get x - hq + ref instead."""
         qd = sub_to(xr.open_dataset(Fdir / f"qdm_{k}.nc").drop_vars("hist_q_raw", errors="ignore").load(), like)
         if "month" not in qd.dims:
             raise ValueError(f"{Fdir / f'qdm_{k}.nc'}: old F format (one training grouped by month): rerun fit_F.")
+        w = int(qd.attrs.get("window_months", 1))
         parts = []
         for m in range(1, 13):
             if not (x.time.dt.month == m).any():
                 continue
             qm, xm = qd.sel(month=m, drop=True), _month(x, m)
-            a = QuantileDeltaMapping.from_dataset(qm).adjust(xm, extrapolation="constant", interp=interp)
+            a = QuantileDeltaMapping.from_dataset(qm).adjust(_months(x, _window(m, w)), extrapolation="constant", interp=interp)
+            a = _month(a, m)
             if tail == "additive":
                 last = lambda v: v.isel(quantiles=-1, drop=True).squeeze(drop=True)   # (lat, lon)
                 hq = last(qm["hist_q"])
@@ -744,7 +785,14 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
             parts.append(a)
         return xr.concat(parts, dim="time").sortby("time")
 
-    if "pr" in S:
+    pr_method = xr.open_dataset(Fdir / "qdm_pr.nc").attrs.get("pr_method", "wdf") if "pr" in S else None
+    if pr_method == "jitter":
+        # Cannon et al. (2015): dry days jittered as in the training, QDM on all days, values < THRESH_PR set to 0
+        pr_j = _prep(_jitter_dry(S["pr"], seed), chunks_space)
+        pr_a = _adjust("pr", pr_j, tail=pr_tail).transpose(*pr_j.dims)
+        out["pr"] = xr.where(pr_a < THRESH_PR, 0.0, pr_a)
+        units.append(("pr", "mm/d"))
+    elif "pr" in S:
         par = xr.open_dataset(Fdir / "wdf_params.nc").load()
         pr_d = wdf_apply(_prep(S["pr"], chunks_space), par, seed=seed)      # dry days = 0
         pr_w = _prep(_wet_only(pr_d), chunks_space)                         # dry days = NaN
