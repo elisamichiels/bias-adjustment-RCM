@@ -749,10 +749,12 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
     QDM: xsdba QuantileDeltaMapping.adjust (extrapolation 'constant'), month by month with that month's training:
     each value is ranked within its month and gets the correction of that rank.
     interp: 'linear' = linear between the quantiles (as in Cannon et al. 2015) | 'nearest' = nearest quantile (faster).
-    pr_tail: 'additive' = pr values above the model's last historical quantile (hq, per pixel and month) are corrected
-      by adding the difference at that quantile, x - hq + ref (ref = ERA5's last quantile), instead of x * ref / hq: the
-      "constant correction" of Boe et al. (2007) for values outside the calibration range (cited by Cannon et al. 2015),
-      which avoids multiplying such values by large factors | None = multiplicative everywhere (plain QDM).
+    pr_tail: 'additive' = pr values above the model's last historical quantile (hq, per pixel and month) get
+      QDM(hq) + (x - hq) instead of the QDM multiplication: the value QDM gives to hq in that run (hq times the factor
+      at the rank of hq) plus the excess x - hq unchanged, i.e. the absolute correction at the edge of the calibration
+      range is kept constant beyond it ("constant correction" of Boe et al. 2007, cited by Cannon et al. 2015; in the
+      historical run QDM(hq) is ERA5's last quantile). Continuous at x = hq, strictly increasing above it, and avoids
+      multiplying values far beyond the calibration range by large factors | None = multiplicative everywhere.
     pr: the dry-day treatment is the one of the training (attribute pr_method of qdm_pr.nc; "wdf" for older files).
     """
     from xsdba.adjustment import QuantileDeltaMapping
@@ -778,10 +780,16 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
             a = QuantileDeltaMapping.from_dataset(qm).adjust(_months(x, _window(m, w)), extrapolation="constant", interp=interp)
             a = _month(a, m)
             if tail == "additive":
-                last = lambda v: v.isel(quantiles=-1, drop=True).squeeze(drop=True)   # (lat, lon)
-                hq = last(qm["hist_q"])
-                ref = hq * last(qm["af"])
-                a = xr.where(xm > hq, xm - hq + ref, a.transpose(*xm.dims))
+                # above hq: QDM(hq) + (x - hq), QDM(hq) = hq * QDM factor at the rank of hq in the same window of the
+                # run; continuous at x = hq and strictly increasing above it (slope 1)
+                from xsdba.utils import interp_on_quantiles
+                hq = qm["hist_q"].isel(quantiles=-1, drop=True).squeeze(drop=True)   # (lat, lon)
+                pool = _months(x, _window(m, w))
+                tau = (pool <= hq).mean("time").expand_dims(time=pool.time[:1])
+                f_hq = interp_on_quantiles(tau, qm["quantiles"], qm["af"], group="time", method=interp,
+                                           extrapolation="constant").isel(time=0, drop=True)
+                a = a.transpose(*xm.dims)
+                a = xr.where(xm > hq, hq * f_hq + (xm - hq), a)
             parts.append(a)
         return xr.concat(parts, dim="time").sortby("time")
 

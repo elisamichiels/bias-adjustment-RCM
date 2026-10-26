@@ -194,6 +194,54 @@ def pr_amplification(adj, raw, path=None, overwrite=False, wet=1.0, big=5.0, lab
     return _cached(path, overwrite, f"the pr amplification of {label or path}", build)
 
 
+ORDER_STATS = ["inv_below", "inv_across", "inv_above", "max_drop_across", "max_drop", "n_above", "n_pairs"]
+
+
+def _order_stats(raw, adj, hq, wet, tol):
+    """raw, adj (..., time); hq (...). Days sorted by raw value (wet days only); an inversion is a drop of the adjusted
+    value larger than tol between two consecutive days (raw strictly increasing)."""
+    raw = np.where(raw >= wet, raw, np.nan)
+    idx = np.argsort(raw, axis=-1)                                          # NaN (dry days) at the end
+    r = np.take_along_axis(raw, idx, axis=-1)
+    a = np.take_along_axis(adj, idx, axis=-1)
+    r0, r1, a0, a1 = r[..., :-1], r[..., 1:], a[..., :-1], a[..., 1:]
+    pair = np.isfinite(r0) & np.isfinite(r1) & np.isfinite(a0) & np.isfinite(a1) & (r1 > r0)
+    drop = np.where(pair, a0 - a1, 0.0)
+    inv = pair & (drop > tol)
+    h = hq[..., None]
+    across = inv & (r0 <= h) & (r1 > h)
+    out = [(inv & (r1 <= h)).sum(-1), across.sum(-1), (inv & (r0 > h)).sum(-1),
+           np.where(across, drop, 0.0).max(-1), np.where(inv, drop, 0.0).max(-1), (r > h).sum(-1), pair.sum(-1)]
+    return np.stack([np.asarray(o, dtype="float32") for o in out], axis=-1)
+
+
+def pr_order(adj, raw, hq, path=None, overwrite=False, wet=None, tol=0.01, chunks_space=None, label=""):
+    """
+    Is the order of the wet days kept by the adjustment? Per pixel and calendar month, the wet days of the raw run
+    (>= wet, default THRESH_PR) are sorted by raw value; a drop of the adjusted value (> tol mm/day) between two
+    consecutive days is an inversion. Counted below the model's last historical quantile hq (hq = hist_q of the last
+    quantile, dims (month, lat, lon): QDM itself), across hq (switch to the additive correction) and above hq; largest
+    drop across hq and overall (mm/day); number of days above hq; number of pairs compared.
+    """
+    wet = bu.THRESH_PR if wet is None else wet
+    cs = chunks_space or {"lat": 32, "lon": 64}
+
+    def build():
+        parts = []
+        for m in range(1, 13):
+            sel = lambda x: x.isel(time=np.flatnonzero(x.time.dt.month.values == m)).chunk({"time": -1, **cs})
+            r, a = sel(raw), sel(adj).assign_coords(time=sel(raw).time)
+            h = hq.sel(month=m, drop=True).assign_coords(lat=r.lat, lon=r.lon).chunk(cs)
+            st = xr.apply_ufunc(_order_stats, r, a, h, kwargs={"wet": wet, "tol": tol},
+                                input_core_dims=[["time"], ["time"], []], output_core_dims=[["stat"]],
+                                dask="parallelized", output_dtypes=["float32"],
+                                dask_gufunc_kwargs={"output_sizes": {"stat": len(ORDER_STATS)}})
+            parts.append(st.assign_coords(stat=ORDER_STATS))
+        st = xr.concat(parts, dim="month").assign_coords(month=np.arange(1, 13))
+        return st.to_dataset(dim="stat")
+    return _cached(path, overwrite, f"the order of the wet days of {label or path}", build)
+
+
 def land_stats(da, q=95):
     """Area-weighted mean and (unweighted) q-th percentile of da over the domain."""
     m = mask_for(da)
