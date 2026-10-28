@@ -742,19 +742,20 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
     print("Parameters written to", outdir)
 
 
-def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tail="additive"):
+def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tail=None):
     """
     Apply F (trained by fit_F) to a run `sim` = dict {'pr','tasmax','tasmin'(,'rsds')}, or a subset of it
     (tasmin needs tasmax). Returns a dict of adjusted DataArrays (lazy).
     QDM: xsdba QuantileDeltaMapping.adjust (extrapolation 'constant'), month by month with that month's training:
     each value is ranked within its month and gets the correction of that rank.
     interp: 'linear' = linear between the quantiles (as in Cannon et al. 2015) | 'nearest' = nearest quantile (faster).
-    pr_tail: 'additive' = pr values above the model's last historical quantile (hq, per pixel and month) get
+    pr_tail: None = plain QDM everywhere (retained: values above the model's last historical quantile hq get the factor
+      of the last quantile; test of 0_precip_regimes section 4) | 'additive' = pr values above hq (per pixel and month) get
       QDM(hq) + (x - hq) instead of the QDM multiplication: the value QDM gives to hq in that run (hq times the factor
       at the rank of hq) plus the excess x - hq unchanged, i.e. the absolute correction at the edge of the calibration
       range is kept constant beyond it ("constant correction" of Boe et al. 2007, cited by Cannon et al. 2015; in the
       historical run QDM(hq) is ERA5's last quantile). Continuous at x = hq, strictly increasing above it, and avoids
-      multiplying values far beyond the calibration range by large factors | None = multiplicative everywhere.
+      multiplying values far beyond the calibration range by large factors.
     pr: the dry-day treatment is the one of the training (attribute pr_method of qdm_pr.nc; "wdf" for older files).
     """
     from xsdba.adjustment import QuantileDeltaMapping
