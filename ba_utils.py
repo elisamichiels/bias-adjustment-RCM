@@ -136,13 +136,18 @@ def gcm_ba_input(cfg, name, var, period=None, region=None):
     return da if period is None else subset_time(da, *period)
 
 
-def gcm_ba_region(cfg, margin=1.0, rcm_run="rcm_2025_nohosing"):
+EURO_CORDEX_BOX = {"lat": (20.0, 75.0), "lon": (-50.0, 70.0)}   # contains the EURO-CORDEX domain (EUR-11: ~22-72.6 N,
+                                                                  # 44.6 W - 65 E) with a margin of 2-5 deg
+
+
+def gcm_ba_region(cfg, margin=1.0, rcm_run="rcm_2025_nohosing", include=EURO_CORDEX_BOX):
     """
-    Region of the GCM bias adjustment (Europe): bounding box of the RCM domain (once its path is in the config) and of
-    the LISFLOOD domain (mask 'ecearth3' of notebook 00c), widened by `margin` degrees, so that the ERA5-like GCM runs
-    cover both the RCM bias adjustment and LISFLOOD. No hand-made box: error if neither domain is available.
+    Region of the GCM bias adjustment (Europe): bounding box of the RCM domain (once its path is in the config), of
+    the LISFLOOD domain (mask 'ecearth3' of notebook 00c) and of `include` (a box the region must contain, by default
+    the EURO-CORDEX domain with a margin, as long as the RCM files are not available), widened by `margin` degrees, so
+    that the ERA5-like GCM runs cover both the RCM bias adjustment and LISFLOOD.
     """
-    boxes = [b for b in (rcm_domain(cfg, rcm_run),) if b]
+    boxes = [b for b in (rcm_domain(cfg, rcm_run), include) if b]
     if domain_mask_path(cfg, "ecearth3").exists():
         m = load_domain_mask(cfg, "ecearth3")
         boxes.append(domain_of(m.where(m, drop=True)))
