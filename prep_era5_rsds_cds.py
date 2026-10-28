@@ -4,7 +4,9 @@ years missing in the BDAP hourly copy (ssrd from 2005 only, see prep_era5_daily.
 
 Source: CDS dataset "ERA5 post-processed daily statistics on single levels" (derived-era5-single-levels-daily-statistics),
 variable surface_solar_radiation_downwards, daily_mean of the 1-hourly values, UTC days, global 0.25 deg.
-One request per month, kept in <raw>/ssrd_daily_mean_<year>_<month>.nc (not downloaded again if present).
+One request per year (the months not downloaded yet; most of the time of a request is spent in the CDS queue),
+kept as one file per month <raw>/ssrd_daily_mean_<year>_<month>.nc (not downloaded again if present); if CDS
+refuses a request of several months, the script falls back to month by month (or: --months-per-request 1).
 
 Daily value: mean of the hourly ssrd accumulations (J m-2 over one hour) / 3600 -> W m-2, clipped at 0
 (= daily mean surface downwelling shortwave radiation, CMIP6 'rsds' units, as prep_era5_daily.py).
@@ -46,17 +48,23 @@ DATASET = "derived-era5-single-levels-daily-statistics"
 STD = {"valid_time": "time", "latitude": "lat", "longitude": "lon"}
 
 
-def download_month(client, year, month, path):
-    """One CDS request (one month, all days); a zip answer is unpacked into `path`."""
-    if path.exists():
-        return
-    tmp = path.with_suffix(".part")
+def month_path(raw, year, month):
+    return raw / f"ssrd_daily_mean_{year}_{month:02d}.nc"
+
+
+def download_months(client, year, months, raw):
+    """One CDS request for several months of a year (all their days): most of the time of a request is spent waiting in
+    the CDS queue, so one request per year waits once instead of 12 times. The answer (one .nc, or a zip of .nc files)
+    is split into one file per month, month_path(raw, year, month)."""
+    tmp = raw / f"ssrd_daily_mean_{year}_{months[0]:02d}-{months[-1]:02d}.part"
+    days = (range(1, calendar.monthrange(year, months[0])[1] + 1) if len(months) == 1
+            else range(1, 32))                                  # several months: CDS ignores the dates that do not exist
     request = {
         "product_type": "reanalysis",
         "variable": ["surface_solar_radiation_downwards"],
         "year": str(year),
-        "month": [f"{month:02d}"],
-        "day": [f"{d:02d}" for d in range(1, calendar.monthrange(year, month)[1] + 1)],
+        "month": [f"{m:02d}" for m in months],
+        "day": [f"{d:02d}" for d in days],
         "daily_statistic": "daily_mean",
         "time_zone": "utc+00:00",
         "frequency": "1_hourly",
@@ -65,12 +73,34 @@ def download_month(client, year, month, path):
     if zipfile.is_zipfile(tmp):
         with zipfile.ZipFile(tmp) as z:
             names = [n for n in z.namelist() if n.endswith(".nc")]
-            if len(names) != 1:
-                raise ValueError(f"{tmp}: expected one .nc file in the zip, found {z.namelist()}")
-            path.write_bytes(z.read(names[0]))
+            if not names:
+                raise ValueError(f"{tmp}: no .nc file in the zip ({z.namelist()})")
+            parts = []
+            for i, n in enumerate(names):
+                p = tmp.with_name(f"{tmp.stem}_{i}.nc")
+                p.write_bytes(z.read(n))
+                parts.append(p)
         tmp.unlink()
     else:
-        tmp.replace(path)
+        parts = [tmp.with_suffix(".nc")]
+        tmp.replace(parts[0])
+    dss = []
+    for p in parts:
+        with xr.open_dataset(p) as d:
+            dss.append(d.load())
+    tn ="valid_time" if "valid_time" in dss[0].dims else "time"
+    ds = (xr.concat(dss, dim=tn) if len(dss) > 1 else dss[0]).sortby(tn)
+    t = ds.indexes[tn]
+    for m in months:
+        sel = ds.isel({tn: np.flatnonzero(t.month == m)})
+        n_days = calendar.monthrange(year, m)[1]
+        if sel.sizes[tn] != n_days:
+            raise ValueError(f"{year}-{m:02d}: {sel.sizes[tn]} days in the CDS answer, {n_days} expected")
+        out = month_path(raw, year, m)
+        sel.to_netcdf(out.with_suffix(".tmp.nc"))
+        out.with_suffix(".tmp.nc").replace(out)
+    for p in parts:
+        p.unlink()
 
 
 def open_month(path):
@@ -81,14 +111,26 @@ def open_month(path):
     return da
 
 
-def build_year(year, raw, dst, client):
+def build_year(year, raw, dst, client, months_per_request=12):
     days = pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")
-    paths = [raw / f"ssrd_daily_mean_{year}_{m:02d}.nc" for m in range(1, 13)]
-    for m, p in enumerate(paths, start=1):
+    paths = [month_path(raw, year, m) for m in range(1, 13)]
+    missing = [m for m, p in enumerate(paths, start=1) if not p.exists()]
+    for i in range(0, len(missing), months_per_request):
+        group = missing[i:i + months_per_request]
         t0 = time.time()
-        if not p.exists():
-            download_month(client, year, m, p)
-            print(f"  {p.name} downloaded in {(time.time() - t0) / 60:.1f} min", flush=True)
+        try:
+            download_months(client, year, group, raw)
+        except Exception as exc:
+            if len(group) == 1:
+                raise
+            print(f"  {year} months {group[0]:02d}-{group[-1]:02d} in one request failed ({exc}): month by month", flush=True)
+            for m in group:
+                t1 = time.time()
+                download_months(client, year, [m], raw)
+                print(f"  {month_path(raw, year, m).name} downloaded in {(time.time() - t1) / 60:.1f} min", flush=True)
+            continue
+        print(f"  {year} months {', '.join(f'{m:02d}' for m in group)} downloaded in {(time.time() - t0) / 60:.1f} min",
+              flush=True)
     da = xr.concat([open_month(p) for p in paths], dim="time")
     if da.sizes["time"] != days.size:
         raise ValueError(f"{year}: {da.sizes['time']} days found, {days.size} expected")
@@ -141,6 +183,8 @@ def main():
     ap.add_argument("--raw", default=RAW, help="folder of the monthly CDS downloads")
     ap.add_argument("--compare", default=None, help="folder of the existing rsds_ERA5_day_<year>.nc to compare with")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--months-per-request", type=int, default=12,
+                    help="months asked in one CDS request (12 = one request per year: one wait in the CDS queue)")
     a = ap.parse_args()
     dst, raw = Path(a.dst), Path(a.raw)
     dst.mkdir(parents=True, exist_ok=True)
@@ -154,7 +198,7 @@ def main():
         else:
             t0 = time.time()
             print(f"{year}: downloading / building", flush=True)
-            build_year(year, raw, dst, client)
+            build_year(year, raw, dst, client, a.months_per_request)
             print(f"{year}: done in {(time.time() - t0) / 60:.1f} min -> {out}", flush=True)
         if a.compare:
             ref = Path(a.compare) / f"rsds_ERA5_day_{year}.nc"
