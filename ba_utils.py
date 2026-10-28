@@ -142,17 +142,14 @@ EURO_CORDEX_BOX = {"lat": (20.0, 75.0), "lon": (-50.0, 70.0)}   # contains the E
 
 def gcm_ba_region(cfg, margin=1.0, rcm_run="rcm_2025_nohosing", include=EURO_CORDEX_BOX):
     """
-    Region of the GCM bias adjustment (Europe): bounding box of the RCM domain (once its path is in the config), of
-    the LISFLOOD domain (mask 'ecearth3' of notebook 00c) and of `include` (a box the region must contain, by default
-    the EURO-CORDEX domain with a margin, as long as the RCM files are not available), widened by `margin` degrees, so
-    that the ERA5-like GCM runs cover both the RCM bias adjustment and LISFLOOD.
+    Region of the GCM bias adjustment (Europe): bounding box of the RCM domain (once its path is in the config) and of
+    `include` (a box the region must contain, by default the EURO-CORDEX domain with a margin, as long as the RCM files
+    are not available), widened by `margin` degrees, so that the ERA5-like GCM runs cover the RCM bias adjustment.
+    (Not the LISFLOOD mask of notebook 00c: it is global.)
     """
     boxes = [b for b in (rcm_domain(cfg, rcm_run), include) if b]
-    if domain_mask_path(cfg, "ecearth3").exists():
-        m = load_domain_mask(cfg, "ecearth3")
-        boxes.append(domain_of(m.where(m, drop=True)))
     if not boxes:
-        raise FileNotFoundError("Region unknown: no RCM path in the config and no LISFLOOD mask (run notebook 00c).")
+        raise ValueError("Region unknown: no RCM path in the config and no box to include.")
     return {k: (min(b[k][0] for b in boxes) - margin, max(b[k][1] for b in boxes) + margin) for k in ("lat", "lon")}
 
 
@@ -466,6 +463,10 @@ def load_domain_mask(cfg, grid="era5", like=None):
     m = (xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1).reset_coords(drop=True)   # lat / lon only
     if like is None or same_grid(m, like):
         return m if like is None else m.assign_coords(lat=like.lat.values, lon=like.lon.values)
+    try:                                 # `like` on a part of the mask's grid (e.g. the region of the GCM bias adjustment)
+        return sub_to(m, like)
+    except KeyError:
+        pass
     mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
     return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat.values, "lon": like.lon.values}, name="domain")
 
