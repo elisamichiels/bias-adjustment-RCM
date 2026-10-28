@@ -122,16 +122,33 @@ def gcm_ba_available(cfg, name, var):
     return dataset_available(cfg, GCM_BA_ERA5 if name == "era5" else name, var)
 
 
-def gcm_ba_input(cfg, name, var, period=None):
+def gcm_ba_input(cfg, name, var, period=None, region=None):
     """Input of the GCM bias adjustment, read directly from the input files and standardised by read_raw
     (degC, mm/day, 'noleap', days at 00:00, pr NH + SH glued): name = 'era5' (ERA5 regridded onto the EC-Earth3
-    grid with CDO), 'gcm_historical' or a GCM run. period = (start, end), None = the whole file."""
+    grid with CDO), 'gcm_historical' or a GCM run. period = (start, end), None = the whole file.
+    region = lat/lon box (gcm_ba_region), None = the whole globe."""
     da = read_raw(cfg, GCM_BA_ERA5 if name == "era5" else name, var)
     if name == "era5":   # same EC-Earth3 grid (checked by notebook 1): identical coordinate values, so that xarray aligns them
         grid = read_raw(cfg, "gcm_historical", "tasmax")
         if same_grid(da, grid):
             da = da.assign_coords(lat=grid.lat.values, lon=grid.lon.values)
+    da = crop_bbox(da, region)
     return da if period is None else subset_time(da, *period)
+
+
+def gcm_ba_region(cfg, margin=1.0, rcm_run="rcm_2025_nohosing"):
+    """
+    Region of the GCM bias adjustment (Europe): bounding box of the RCM domain (once its path is in the config) and of
+    the LISFLOOD domain (mask 'ecearth3' of notebook 00c), widened by `margin` degrees, so that the ERA5-like GCM runs
+    cover both the RCM bias adjustment and LISFLOOD. No hand-made box: error if neither domain is available.
+    """
+    boxes = [b for b in (rcm_domain(cfg, rcm_run),) if b]
+    if domain_mask_path(cfg, "ecearth3").exists():
+        m = load_domain_mask(cfg, "ecearth3")
+        boxes.append(domain_of(m.where(m, drop=True)))
+    if not boxes:
+        raise FileNotFoundError("Region unknown: no RCM path in the config and no LISFLOOD mask (run notebook 00c).")
+    return {k: (min(b[k][0] for b in boxes) - margin, max(b[k][1] for b in boxes) + margin) for k in ("lat", "lon")}
 
 
 def dataset_available(cfg, name, var):

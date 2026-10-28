@@ -56,6 +56,10 @@ def mask_for(da):
     for m in STATE["masks"]:
         if bu.same_grid(m, da):
             return m.assign_coords(lat=da.lat, lon=da.lon)
+        try:                                  # da on a part of the mask's grid (region of the GCM bias adjustment)
+            return bu.sub_to(m, da)
+        except KeyError:
+            pass
     m = bu.load_domain_mask(STATE["cfg"], STATE["mask_files"][0], like=da)
     STATE["masks"].append(m)
     return m
