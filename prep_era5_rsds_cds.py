@@ -22,7 +22,9 @@ Usage (JEO-lab terminal, from the repository folder):
   python prep_era5_rsds_cds.py --start 2006 --end 2006 --dst <check folder> --compare <ERA5_daily folder>
   # the missing years
   nohup python prep_era5_rsds_cds.py --start 1981 --end 2004 > era5_rsds_cds.log 2>&1 &
-Years already written are skipped, so the script can be stopped and restarted.
+Years already written are skipped, so the script can be stopped and restarted. If a request finished on CDS after
+the script stopped, its answer can be downloaded from the CDS web page into <raw>/ssrd_daily_mean_<year>_01-12.part:
+the script then uses it instead of sending the request again.
 """
 import argparse
 import calendar
@@ -69,7 +71,10 @@ def download_months(client, year, months, raw):
         "time_zone": "utc+00:00",
         "frequency": "1_hourly",
     }
-    client.retrieve(DATASET, request, str(tmp))
+    if tmp.exists():   # answer of an earlier request, downloaded by hand from the CDS web page (e.g. curl -o <tmp> <link>)
+        print(f"  {tmp.name}: file already downloaded, no new CDS request", flush=True)
+    else:
+        client.retrieve(DATASET, request, str(tmp))
     if zipfile.is_zipfile(tmp):
         with zipfile.ZipFile(tmp) as z:
             names = [n for n in z.namelist() if n.endswith(".nc")]
