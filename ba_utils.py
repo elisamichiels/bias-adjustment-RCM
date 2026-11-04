@@ -454,21 +454,53 @@ def domain_mask_path(cfg, grid="era5"):
     return Path(cfg["out_root"]).parent / "extra_files" / DOMAIN_FILES[grid]
 
 
+AFRICA = ("Algeria", "Angola", "Benin", "Botswana", "Burkina Faso", "Burundi", "Cabo Verde", "Cameroon",
+          "Central African Rep.", "Chad", "Comoros", "Congo", "Dem. Rep. Congo", "Côte d'Ivoire", "Djibouti", "Egypt",
+          "Eq. Guinea", "Eritrea", "eSwatini", "Ethiopia", "Gabon", "Gambia", "Ghana", "Guinea", "Guinea-Bissau", "Kenya",
+          "Lesotho", "Liberia", "Libya", "Madagascar", "Malawi", "Mali", "Mauritania", "Mauritius", "Morocco", "Mozambique",
+          "Namibia", "Niger", "Nigeria", "Rwanda", "São Tomé and Principe", "Senegal", "Seychelles", "Sierra Leone",
+          "Somalia", "Somaliland", "South Africa", "S. Sudan", "Sudan", "Tanzania", "Togo", "Tunisia", "Uganda",
+          "W. Sahara", "Zambia", "Zimbabwe")   # Natural Earth 1:50m country names (names absent from the file are skipped)
+EXCLUDE_LAND = AFRICA   # land left out of the European GCM / RCM bias adjustment and of its statistics (supervisor,
+                        # Nov 2026: Europe box, Africa removed by a mask); () = keep all the land of the box
+
+
+def excluded_land(lat, lon, names=EXCLUDE_LAND):
+    """True on the land of the countries `names` (Natural Earth 1:50m, test on the pixel centres), as a (lat, lon)
+    DataArray; all False when `names` is empty. Sea pixels are never excluded."""
+    lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    out = xr.DataArray(np.zeros((lat.size, lon.size), bool), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+    if not names:
+        return out
+    import regionmask
+    r = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
+    keep = [n for n in names if n in r.names]
+    if names is AFRICA:
+        assert {"Morocco", "Algeria", "Tunisia", "Libya", "Egypt"} <= set(keep), "Natural Earth names changed"
+    return out | r[keep].mask(lon, lat).notnull().values
+
+
+def keep_mask(da):
+    """True outside EXCLUDE_LAND (Africa), on the lat / lon grid of `da`: the pixels kept in the bias-adjusted products."""
+    return ~excluded_land(da.lat.values, da.lon.values).assign_coords(lat=da.lat, lon=da.lon)
+
+
 def load_domain_mask(cfg, grid="era5", like=None):
     """
-    LISFLOOD domain mask (True = inside) written by notebook 00c, on the 'era5' or 'ecearth3' grid.
-    With `like`: the mask is checked against (or, if the grids differ, transferred to) the grid of `like`
-    with the "at least one" rule (mask_any).
+    LISFLOOD domain mask (True = inside) written by notebook 00c, on the 'era5' or 'ecearth3' grid, without the land
+    of EXCLUDE_LAND (Africa). With `like`: the mask is checked against (or, if the grids differ, transferred to) the
+    grid of `like` with the "at least one" rule (mask_any).
     """
     m = (xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1).reset_coords(drop=True)   # lat / lon only
     if like is None or same_grid(m, like):
-        return m if like is None else m.assign_coords(lat=like.lat.values, lon=like.lon.values)
-    try:                                 # `like` on a part of the mask's grid (e.g. the region of the GCM bias adjustment)
-        return sub_to(m, like)
-    except KeyError:
-        pass
-    mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
-    return xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat.values, "lon": like.lon.values}, name="domain")
+        m = m if like is None else m.assign_coords(lat=like.lat.values, lon=like.lon.values)
+    else:
+        try:                             # `like` on a part of the mask's grid (e.g. the region of the GCM bias adjustment)
+            m = sub_to(m, like)
+        except KeyError:
+            mk, _ = mask_any(m.values, m.lat.values, m.lon.values, like.lat.values, like.lon.values)
+            m = xr.DataArray(mk, dims=("lat", "lon"), coords={"lat": like.lat.values, "lon": like.lon.values}, name="domain")
+    return m & ~excluded_land(m.lat.values, m.lon.values).values
 
 
 GISCO_URL = "https://gisco-services.ec.europa.eu/distribution/v2/countries/geojson/CNTR_BN_{res}_2020_4326_COASTL.geojson"
