@@ -454,41 +454,44 @@ def domain_mask_path(cfg, grid="era5"):
     return Path(cfg["out_root"]).parent / "extra_files" / DOMAIN_FILES[grid]
 
 
-AFRICA = ("Algeria", "Angola", "Benin", "Botswana", "Burkina Faso", "Burundi", "Cabo Verde", "Cameroon",
-          "Central African Rep.", "Chad", "Comoros", "Congo", "Dem. Rep. Congo", "Côte d'Ivoire", "Djibouti", "Egypt",
-          "Eq. Guinea", "Eritrea", "eSwatini", "Ethiopia", "Gabon", "Gambia", "Ghana", "Guinea", "Guinea-Bissau", "Kenya",
-          "Lesotho", "Liberia", "Libya", "Madagascar", "Malawi", "Mali", "Mauritania", "Mauritius", "Morocco", "Mozambique",
-          "Namibia", "Niger", "Nigeria", "Rwanda", "São Tomé and Principe", "Senegal", "Seychelles", "Sierra Leone",
-          "Somalia", "Somaliland", "South Africa", "S. Sudan", "Sudan", "Tanzania", "Togo", "Tunisia", "Uganda",
-          "W. Sahara", "Zambia", "Zimbabwe")   # Natural Earth 1:50m country names (names absent from the file are skipped)
-EXCLUDE_LAND = AFRICA   # land left out of the European GCM / RCM bias adjustment and of its statistics (supervisor,
-                        # Nov 2026: Europe box, Africa removed by a mask); () = keep all the land of the box
+EUROPE = ("Albania", "Andorra", "Austria", "Belarus", "Belgium", "Bosnia and Herz.", "Bulgaria", "Croatia", "Cyprus",
+          "N. Cyprus", "Czechia", "Denmark", "Estonia", "Faeroe Is.", "Finland", "France", "Germany", "Greece", "Guernsey",
+          "Hungary", "Iceland", "Ireland", "Isle of Man", "Italy", "Jersey", "Kosovo", "Latvia", "Liechtenstein",
+          "Lithuania", "Luxembourg", "Malta", "Moldova", "Monaco", "Montenegro", "Netherlands", "North Macedonia", "Norway",
+          "Poland", "Portugal", "Romania", "Russia", "San Marino", "Serbia", "Slovakia", "Slovenia", "Spain", "Sweden",
+          "Switzerland", "Ukraine", "United Kingdom", "Vatican", "Åland")   # Natural Earth 1:50m country names
+KEEP_LAND = EUROPE        # land kept in the European GCM / RCM bias adjustment and in its statistics (supervisor, Nov 2026:
+                          # "really Europe"; outside Europe, in arid regions, QDM needed a rule above hq); None = all land
+EUROPE_EAST_LIMIT = 60.0  # deg E: land east of the Urals (Russia) left out too
 
 
-def excluded_land(lat, lon, names=EXCLUDE_LAND):
-    """True on the land of the countries `names` (Natural Earth 1:50m, test on the pixel centres), as a (lat, lon)
-    DataArray; all False when `names` is empty. Sea pixels are never excluded."""
+def excluded_land(lat, lon, keep=KEEP_LAND, east_limit=EUROPE_EAST_LIMIT):
+    """True on the land outside Europe: land of every Natural Earth 1:50m country not in `keep`, and land east of
+    `east_limit` (test on the pixel centres), as a (lat, lon) DataArray; all False when `keep` is None. Sea pixels are
+    never excluded (they serve the interpolation along the coasts)."""
     lat, lon = np.asarray(lat, float), np.asarray(lon, float)
     out = xr.DataArray(np.zeros((lat.size, lon.size), bool), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
-    if not names:
+    if keep is None:
         return out
     import regionmask
     r = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
-    keep = [n for n in names if n in r.names]
-    if names is AFRICA:
-        assert {"Morocco", "Algeria", "Tunisia", "Libya", "Egypt"} <= set(keep), "Natural Earth names changed"
-    return out | r[keep].mask(lon, lat).notnull().values
+    assert {"France", "Russia", "Norway", "Spain", "Italy"} <= set(r.names), "Natural Earth names changed"
+    land = r.mask(lon, lat).notnull().values
+    kept = r[[n for n in keep if n in r.names]].mask(lon, lat).notnull().values
+    east = (np.mod(lon + 180.0, 360.0) - 180.0)[None, :] > east_limit if east_limit is not None else False
+    return out | (land & (~kept | east))
 
 
 def keep_mask(da):
-    """True outside EXCLUDE_LAND (Africa), on the lat / lon grid of `da`: the pixels kept in the bias-adjusted products."""
+    """True on European land and on the sea (not excluded_land), on the lat / lon grid of `da`: the pixels kept in the
+    bias-adjusted products."""
     return ~excluded_land(da.lat.values, da.lon.values).assign_coords(lat=da.lat, lon=da.lon)
 
 
 def load_domain_mask(cfg, grid="era5", like=None):
     """
     LISFLOOD domain mask (True = inside) written by notebook 00c, on the 'era5' or 'ecearth3' grid, without the land
-    of EXCLUDE_LAND (Africa). With `like`: the mask is checked against (or, if the grids differ, transferred to) the
+    outside Europe (excluded_land). With `like`: the mask is checked against (or, if the grids differ, transferred to) the
     grid of `like` with the "at least one" rule (mask_any).
     """
     m = (xr.open_dataset(domain_mask_path(cfg, grid))["domain"].load() == 1).reset_coords(drop=True)   # lat / lon only
