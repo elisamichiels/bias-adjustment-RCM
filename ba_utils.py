@@ -462,13 +462,14 @@ EUROPE = ("Albania", "Andorra", "Austria", "Belarus", "Belgium", "Bosnia and Her
           "Switzerland", "Ukraine", "United Kingdom", "Vatican", "Åland")   # Natural Earth 1:50m country names
 KEEP_LAND = EUROPE        # land kept in the European GCM / RCM bias adjustment and in its statistics (supervisor, Nov 2026:
                           # "really Europe"; outside Europe, in arid regions, QDM needed a rule above hq); None = all land
-EUROPE_EAST_LIMIT = 60.0  # deg E: land east of the Urals (Russia) left out too
+EFAS_BOX = {"lat": (22.75, 72.25), "lon": (-25.25, 50.25)}   # domain of EFAS (LISFLOOD Europe): land outside it left out
+THRACE = {"lat": (40.0, 42.2), "lon": (25.9, 29.2)}          # European Turkey (East Thrace, west of the Bosphorus): kept
 
 
-def excluded_land(lat, lon, keep=KEEP_LAND, east_limit=EUROPE_EAST_LIMIT):
-    """True on the land outside Europe: land of every Natural Earth 1:50m country not in `keep`, and land east of
-    `east_limit` (test on the pixel centres), as a (lat, lon) DataArray; all False when `keep` is None. Sea pixels are
-    never excluded (they serve the interpolation along the coasts)."""
+def excluded_land(lat, lon, keep=KEEP_LAND, box=EFAS_BOX):
+    """True on the land outside Europe: land of every Natural Earth 1:50m country not in `keep` (European Turkey, THRACE,
+    kept) and land outside `box` (the EFAS domain), test on the pixel centres, as a (lat, lon) DataArray; all False when
+    `keep` is None. Sea pixels are never excluded (they serve the interpolation along the coasts)."""
     lat, lon = np.asarray(lat, float), np.asarray(lon, float)
     out = xr.DataArray(np.zeros((lat.size, lon.size), bool), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
     if keep is None:
@@ -478,8 +479,11 @@ def excluded_land(lat, lon, keep=KEEP_LAND, east_limit=EUROPE_EAST_LIMIT):
     assert {"France", "Russia", "Norway", "Spain", "Italy"} <= set(r.names), "Natural Earth names changed"
     land = r.mask(lon, lat).notnull().values
     kept = r[[n for n in keep if n in r.names]].mask(lon, lat).notnull().values
-    east = (np.mod(lon + 180.0, 360.0) - 180.0)[None, :] > east_limit if east_limit is not None else False
-    return out | (land & (~kept | east))
+    lon180 = np.mod(lon + 180.0, 360.0) - 180.0
+    inside = lambda b: (lat[:, None] >= b["lat"][0]) & (lat[:, None] <= b["lat"][1]) & (lon180[None, :] >= b["lon"][0]) & (lon180[None, :] <= b["lon"][1])
+    kept |= (r[["Turkey"]].mask(lon, lat).notnull().values & inside(THRACE))
+    outside = ~inside(box) if box is not None else False
+    return out | (land & (~kept | outside))
 
 
 def keep_mask(da):
