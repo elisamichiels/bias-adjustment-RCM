@@ -4,6 +4,8 @@ Alternative to the supervisor's downscaling pipeline (BCCAQv2, run in its own re
 RCM bias adjustment. Proposed in November 2026. Notebook 1 runs as soon as F1 is done; notebooks 2-4 need the RCM
 runs in the config (notebook 00).
 
+Method, status, results and known limits (F1 verification of 5 Nov 2026 included): `RCM_BA_alternative_method_notes.docx` (generated from the notes of the work, not edited by hand).
+
 | notebook | what | needs |
 |---|---|---|
 | `1_reference_quantiles/reference_quantiles` | ERA5 0.25 deg extract (EFAS domain + 1 deg, 1981-2014), reference quantiles (`bu.reference_quantiles`) | ERA5, F1 product of `gcm_2025_nohosing` |
