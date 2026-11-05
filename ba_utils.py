@@ -469,7 +469,10 @@ THRACE = {"lat": (40.0, 42.2), "lon": (25.9, 29.2)}          # European Turkey (
 def excluded_land(lat, lon, keep=KEEP_LAND, box=EFAS_BOX):
     """True on the land outside Europe: land of every Natural Earth 1:50m country not in `keep` (European Turkey, THRACE,
     kept) and land outside `box` (the EFAS domain), test on the pixel centres, as a (lat, lon) DataArray; all False when
-    `keep` is None. Sea pixels are never excluded (they serve the interpolation along the coasts)."""
+    `keep` is None. A sea pixel (centre at sea) takes the side of the nearest land pixel of the grid: the sea along the
+    European coasts is kept (interpolation along the coasts), the sea along the other coasts is left out. Without it the
+    coastal cells of the LISFLOOD mask centred at sea (Gujarat, Oman, Mauritania: monsoon or desert coasts, pr up to
+    1861 mm/day after F1) stayed in the products and in their statistics."""
     lat, lon = np.asarray(lat, float), np.asarray(lon, float)
     out = xr.DataArray(np.zeros((lat.size, lon.size), bool), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
     if keep is None:
@@ -483,12 +486,17 @@ def excluded_land(lat, lon, keep=KEEP_LAND, box=EFAS_BOX):
     inside = lambda b: (lat[:, None] >= b["lat"][0]) & (lat[:, None] <= b["lat"][1]) & (lon180[None, :] >= b["lon"][0]) & (lon180[None, :] <= b["lon"][1])
     kept |= (r[["Turkey"]].mask(lon, lat).notnull().values & inside(THRACE))
     outside = ~inside(box) if box is not None else False
-    return out | (land & (~kept | outside))
+    exc = land & (~kept | outside)
+    if land.any() and not land.all():
+        from scipy.ndimage import distance_transform_edt
+        ii, jj = distance_transform_edt(~land, return_distances=False, return_indices=True)   # nearest land pixel
+        exc |= ~land & exc[ii, jj]
+    return out | exc
 
 
 def keep_mask(da):
-    """True on European land and on the sea (not excluded_land), on the lat / lon grid of `da`: the pixels kept in the
-    bias-adjusted products."""
+    """True on European land and on the sea along it (not excluded_land), on the lat / lon grid of `da`: the pixels
+    kept in the bias-adjusted products."""
     return ~excluded_land(da.lat.values, da.lon.values).assign_coords(lat=da.lat, lon=da.lon)
 
 
@@ -920,6 +928,19 @@ def rechunk_file(path):
     with xr.open_dataset(path, chunks={}, **_TIME_KW) as ds:
         ds = ds.chunk({"time": CHUNK_TIME_FILE * 100, "lat": -1, "lon": -1})   # ~ the 3103 days of the old chunks
         tmp = path.with_suffix(".rechunk.nc")
+        ds.to_netcdf(tmp, encoding={v: _encoding(ds[v]) for v in ds.data_vars})
+    tmp.replace(path)
+    return path
+
+
+def remask_file(path):
+    """Set to NaN, in an existing product, the pixels outside keep_mask (after a change of excluded_land); the other
+    pixels are unchanged (the adjustment is pixel by pixel). Written through a temporary file."""
+    path = Path(path)
+    with xr.open_dataset(path, chunks={"time": CHUNK_TIME_FILE * 100}, **_TIME_KW) as ds:
+        k = keep_mask(ds)
+        ds = ds.assign({v: ds[v].where(k) for v in ds.data_vars if {"lat", "lon"} <= set(ds[v].dims)})
+        tmp = path.with_suffix(".remask.nc")
         ds.to_netcdf(tmp, encoding={v: _encoding(ds[v]) for v in ds.data_vars})
     tmp.replace(path)
     return path
