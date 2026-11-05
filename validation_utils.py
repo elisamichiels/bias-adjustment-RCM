@@ -1,12 +1,12 @@
 """
-validation_utils.py - helpers shared by the validation / verification notebooks (plan_B/3_validations, GCM_BA/4_verification).
+validation_utils.py - helpers shared by the validation / verification notebooks (GCM_BA/4_verification, alternative_solution_BA_RCM).
 
 Same conventions as the exploration notebook (001_exploration/01_exploration):
   - statistics of a dataset computed once and cached: monthly climatology, yearly means, yearly extremes,
     dry days, wet-day intensity, pooled quantiles on random pixels of the domain;
   - masks of notebook 00c (LISFLOOD domain, with or without the 0.25 deg buffer);
   - maps with coastlines (GISCO), Welch t-test dots, relative differences for pr.
-The F1 analogue downscaling is not synchronised day by day with ERA5: only statistics are compared.
+The GCM and RCM runs are free runs, not synchronised day by day with ERA5: only statistics are compared.
 """
 import numpy as np
 import pandas as pd
