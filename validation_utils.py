@@ -270,6 +270,159 @@ def regrid_stats(ds, grid, path=None, overwrite=False):
 
 
 # --------------------------------------------------------------------------
+# dependence structure: temporal, spatial, between variables (Vrac & Friederichs 2015; VALUE, Maraun et al. 2015)
+# --------------------------------------------------------------------------
+WET_DEP = 1.0                         # mm/day: wet day of the transition probabilities and of the spells (ETCCDI)
+DEP_SEASONS = ("DJF", "JJA")
+DEP_BINS_KM = np.arange(0, 1550, 50)  # distance classes of the spatial correlation
+DEP_BLOCKS = (1, 3, 6)                # blocks of k x k cells for the areal extremes (0.7 deg: about 75, 225, 450 km)
+
+
+def domain_pixels(da):
+    """Values of the domain pixels as a (time, pixel) float32 array (read on the bounding box of the domain), with the
+    pixel coordinates and grid indices and the month / year of each day."""
+    m = mask_for(da).values
+    i, j = np.nonzero(m)
+    box = da.isel(lat=slice(i.min(), i.max() + 1), lon=slice(j.min(), j.max() + 1)).transpose("time", "lat", "lon").values
+    return {"x": box[:, i - i.min(), j - j.min()].astype("float32"), "lat": da.lat.values[i], "lon": da.lon.values[j],
+            "ii": i, "jj": j, "month": da.time.dt.month.values, "year": da.time.dt.year.values}
+
+
+def _pearson_cols(x, y):
+    x = x - x.mean(0)
+    y = y - y.mean(0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (x * y).sum(0) / np.sqrt((x * x).sum(0) * (y * y).sum(0))
+
+
+def _anomalies(x, month):
+    a = np.empty_like(x)
+    for m in range(1, 13):
+        s = month == m
+        if s.any():
+            a[s] = x[s] - x[s].mean(0)
+    return a
+
+
+def _spells(wet, year):
+    """Per pixel: mean wet and dry spell length (days), mean annual maximum dry (CDD) and wet (CWD) spell; a spell
+    counts for the year it starts in."""
+    T, P = wet.shape
+    yrs = np.unique(year)
+    out = np.full((4, P), np.nan, "float32")
+    for p in range(P):
+        w = wet[:, p]
+        starts = np.r_[0, np.flatnonzero(np.diff(w.astype(np.int8))) + 1]
+        lens, kind, ys = np.diff(np.r_[starts, T]), w[starts], np.searchsorted(yrs, year[starts])
+        for k, sel in ((0, kind), (1, ~kind)):
+            if sel.any():
+                out[k, p] = lens[sel].mean()
+        for k, sel in ((2, ~kind), (3, kind)):
+            mx = np.zeros(yrs.size)
+            np.maximum.at(mx, ys[sel], lens[sel])
+            out[k, p] = mx.mean()
+    return out
+
+
+def _distance_km(lat, lon):
+    la, lo = np.deg2rad(lat), np.deg2rad(lon)
+    c = np.sin(la)[:, None] * np.sin(la)[None, :] + np.cos(la)[:, None] * np.cos(la)[None, :] * np.cos(lo[:, None] - lo[None, :])
+    return 6371.0 * np.arccos(np.clip(c, -1, 1))
+
+
+def spatial_correlation(x, lat, lon, bins=DEP_BINS_KM):
+    """Mean Pearson correlation of the daily series of all pairs of pixels, per distance class: (centres, means, n)."""
+    z = x - x.mean(0)
+    sd = z.std(0)
+    ok = sd > 0
+    z = z[:, ok] / sd[ok]
+    c = (z.T @ z) / z.shape[0]
+    iu = np.triu_indices(ok.sum(), 1)
+    d = _distance_km(lat[ok], lon[ok])[iu]
+    k = np.digitize(d, bins) - 1
+    good = (k >= 0) & (k < bins.size - 1)
+    n = np.bincount(k[good], minlength=bins.size - 1)
+    s = np.bincount(k[good], weights=c[iu][good], minlength=bins.size - 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return 0.5 * (bins[:-1] + bins[1:]), s / n, n
+
+
+def efold_km(centres, r):
+    """Distance where the mean correlation falls below 1/e (linear interpolation; NaN if it never does)."""
+    below = np.flatnonzero(r < np.exp(-1))
+    if below.size == 0 or below[0] == 0:
+        return np.nan
+    k = below[0]
+    return float(centres[k - 1] + (np.exp(-1) - r[k - 1]) * (centres[k] - centres[k - 1]) / (r[k] - r[k - 1]))
+
+
+def areal_extremes(pr, ii, jj, year, ks=DEP_BLOCKS, min_cells=0.5):
+    """Extremes of the areal mean pr over blocks of k x k grid cells with at least `min_cells` of them in the domain:
+    mean annual Rx1day and Rx5day of the block mean, and the areal reduction factor ARF = areal Rx1day / mean Rx1day of
+    its pixels. Returns {k: DataFrame per block}."""
+    yrs = np.unique(year)
+    cs = np.vstack([np.zeros((1, pr.shape[1]), pr.dtype), np.cumsum(pr, 0)])
+
+    def ann_max(a):
+        return np.stack([a[year[: a.shape[0]] == y].max(0) for y in yrs]).mean(0)
+
+    px_rx1 = ann_max(pr)
+    out = {}
+    for k in ks:
+        bid = (ii // k) * 100000 + (jj // k)
+        ub, inv, cnt = np.unique(bid, return_inverse=True, return_counts=True)
+        keep = cnt >= min_cells * k * k
+        S = np.zeros((pr.shape[1], ub.size), "float32")
+        S[np.arange(pr.shape[1]), inv] = 1.0 / cnt[inv]
+        S = S[:, keep]
+        a = pr @ S                                            # areal mean of each block, (time, block)
+        a5 = (cs[5:] - cs[:-5]) @ S                           # 5-day sums of the areal mean (starting day)
+        rx1, rx5 = ann_max(a), ann_max(a5)
+        out[k] = pd.DataFrame({"cells": cnt[keep], "Rx1day": rx1, "Rx5day": rx5,
+                               "ARF": rx1 / ((px_rx1 @ (S > 0)) / (S > 0).sum(0))})
+    return out
+
+
+def dependence_stats(pr, tx, path=None, overwrite=False, label=""):
+    """Dependence statistics of one dataset over the domain, from the pixels of domain_pixels (pr and tasmax on the
+    same grid and days): per pixel (temporal and between variables), per distance class (spatial), per block (areal
+    extremes). Cached as a pickle."""
+    if path is not None and path.exists() and not overwrite:
+        return pd.read_pickle(path)
+    print(f"-> computing the dependence statistics of {label}", flush=True)
+    from scipy.stats import rankdata
+    x, a, mon, yr = pr["x"], _anomalies(tx["x"], tx["month"]), pr["month"], pr["year"]
+    wet = x >= WET_DEP
+    T = {}
+    for s in DEP_SEASONS:
+        sel = np.isin(mon, SEASONS[s])
+        idx = np.flatnonzero(sel[:-1] & sel[1:])                                 # pairs of consecutive days of s
+        T[f"lag-1 autocorrelation pr, {s}"] = _pearson_cols(x[idx], x[idx + 1])
+        T[f"lag-1 autocorrelation tasmax anomaly, {s}"] = _pearson_cols(a[idx], a[idx + 1])
+        w0, w1 = wet[idx], wet[idx + 1]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            T[f"P(wet | wet), {s}"] = (w0 & w1).sum(0) / w0.sum(0)
+            T[f"P(wet | dry), {s}"] = (~w0 & w1).sum(0) / (~w0).sum(0)
+        T[f"Spearman pr - tasmax, {s}"] = _pearson_cols(rankdata(x[sel], axis=0), rankdata(tx["x"][sel], axis=0))
+    sp = _spells(wet, yr)
+    for k, n in enumerate(("mean wet spell (days)", "mean dry spell (days)", "CDD (days)", "CWD (days)")):
+        T[n] = sp[k]
+    temporal = pd.DataFrame(T)
+    spatial = {}
+    for s in DEP_SEASONS:
+        sel = np.isin(mon, SEASONS[s])
+        for v, arr in (("pr", x), ("tasmax anomaly", a)):
+            c, r, n = spatial_correlation(arr[sel], pr["lat"], pr["lon"])
+            spatial[(v, s)] = r
+    spatial = pd.DataFrame(spatial, index=pd.Index(c, name="distance (km)"))
+    out = {"temporal": temporal, "spatial": spatial, "areal": areal_extremes(x, pr["ii"], pr["jj"], yr),
+           "lat": pr["lat"], "lon": pr["lon"], "ii": pr["ii"], "jj": pr["jj"]}
+    if path is not None:
+        pd.to_pickle(out, path)
+    return out
+
+
+# --------------------------------------------------------------------------
 # climatologies, differences, scores
 # --------------------------------------------------------------------------
 def has(ds, v, kind="year_mean"):
