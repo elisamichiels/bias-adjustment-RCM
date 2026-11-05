@@ -899,6 +899,32 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
 # --------------------------------------------------------------------------
 # 4. Saving, simple diagnostics, environment helpers
 # --------------------------------------------------------------------------
+CHUNK_TIME_FILE = 31   # days per NetCDF chunk on disk, = chunk_time of read_processed
+
+
+def _encoding(da):
+    """Compressed float32; NetCDF chunks of CHUNK_TIME_FILE days x the whole grid, so that reading by blocks of days
+    (read_processed, verification) decompresses each chunk once. The netCDF-C default (3103 days x 21 x 44 on the
+    Europe box) made each 31-day block decompress 16 chunks of 3103 days: statistics of an F1 file ~10x slower than
+    those of the raw files."""
+    enc = {"zlib": True, "complevel": 3, "dtype": "float32", "_FillValue": np.float32(1e20)}
+    if "time" in da.dims:
+        enc["chunksizes"] = tuple(min(CHUNK_TIME_FILE, n) if d == "time" else n for d, n in zip(da.dims, da.shape))
+    return enc
+
+
+def rechunk_file(path):
+    """Rewrite an existing NetCDF written with the default chunks (before _encoding) with the chunks of _encoding.
+    Read along its own chunks (no amplification), written through a temporary file."""
+    path = Path(path)
+    with xr.open_dataset(path, chunks={}, **_TIME_KW) as ds:
+        ds = ds.chunk({"time": CHUNK_TIME_FILE * 100, "lat": -1, "lon": -1})   # ~ the 3103 days of the old chunks
+        tmp = path.with_suffix(".rechunk.nc")
+        ds.to_netcdf(tmp, encoding={v: _encoding(ds[v]) for v in ds.data_vars})
+    tmp.replace(path)
+    return path
+
+
 def save_da(da, path, name=None, progress=True):
     """Write a DataArray to compressed NetCDF (float32) through a temporary file."""
     from dask.diagnostics import ProgressBar
@@ -907,7 +933,7 @@ def save_da(da, path, name=None, progress=True):
     name = name or da.name
     da = da.astype("float32").rename(name)
     tmp = path.with_suffix(".tmp.nc")
-    enc = {name: {"zlib": True, "complevel": 3, "dtype": "float32", "_FillValue": np.float32(1e20)}}
+    enc = {name: _encoding(da)}
     if progress:
         with ProgressBar():
             da.to_dataset().to_netcdf(tmp, encoding=enc)
@@ -924,8 +950,7 @@ def save_ds(ds, path, progress=True):
     path.parent.mkdir(parents=True, exist_ok=True)
     ds = ds.astype("float32")
     tmp = path.with_suffix(".tmp.nc")
-    enc = {v: {"zlib": True, "complevel": 3, "dtype": "float32", "_FillValue": np.float32(1e20)}
-           for v in ds.data_vars}
+    enc = {v: _encoding(ds[v]) for v in ds.data_vars}
     if progress:
         with ProgressBar():
             ds.to_netcdf(tmp, encoding=enc)
