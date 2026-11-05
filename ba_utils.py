@@ -1008,3 +1008,157 @@ def start_dask(n_workers=None, threads_per_worker=1, memory_limit="auto"):
     client = Client(cluster)
     print(f"Dask cluster: {n_workers} workers. Dashboard: {client.dashboard_link}")
     return client
+
+
+# --------------------------------------------------------------------------
+# 5. Alternative solution for the RCM: reference quantiles (F1 + BCSD) and F2
+# --------------------------------------------------------------------------
+def alt_dir(cfg, *parts):
+    """Output folders of the alternative solution for the RCM: <gcm_ba_root>/../RCM_BA_alternative/<parts>."""
+    root = Path(cfg.get("gcm_ba_root") or Path(cfg["out_root"]).parent.parent / "GCM_BA").parent / "RCM_BA_alternative"
+    d = root.joinpath(*parts)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def window_quantiles(x, nq, window_months=CAL_WINDOW_MONTHS, wet_only=False, chunks_space=None):
+    """Quantiles of x at the nodes of a QDM training of xsdba (equally_spaced_nodes(nq), xsdba.nbutils.quantile), for
+    each calendar month m on the days of the window_months months centred on m (as fit_F); wet_only: days >= THRESH_PR
+    only. Returns (month, quantiles, lat, lon), lazy."""
+    from xsdba.nbutils import quantile
+    from xsdba.utils import equally_spaced_nodes
+    q = equally_spaced_nodes(nq)
+    x = _wet_only(x) if wet_only else x
+    out = [quantile(_prep(_months(x, _window(m, window_months)), chunks_space or {"lat": 32, "lon": 64}), q, "time")
+           for m in range(1, 13)]
+    return xr.concat(out, dim="month").assign_coords(month=np.arange(1, 13)).transpose("month", "quantiles", "lat", "lon")
+
+
+def window_dry_fraction(x, window_months=CAL_WINDOW_MONTHS):
+    """Dry-day fraction (pr < THRESH_PR) of each calendar month m on the window_months months centred on m:
+    (month, lat, lon), lazy."""
+    out = []
+    for m in range(1, 13):
+        w = _months(x, _window(m, window_months))
+        out.append((w < THRESH_PR).where(w.notnull()).mean("time"))
+    return xr.concat(out, dim="month").assign_coords(month=np.arange(1, 13))
+
+
+def interp_to(da, like, log=False):
+    """Field of a coarse grid on the lat / lon grid of `like`: bilinear interpolation (of the log for ratios); the fine
+    pixels without four valid coarse neighbours (next to the land left out of F1) take the nearest coarse value."""
+    x = np.log(da) if log else da
+    lin = x.interp(lat=like.lat.values, lon=like.lon.values, method="linear")
+    near = x.interp(lat=like.lat.values, lon=like.lon.values, method="nearest")
+    out = lin.fillna(near).assign_coords(lat=like.lat, lon=like.lon)
+    return np.exp(out) if log else out
+
+
+def _wet_to_all(qw, p0, nodes):
+    """All-day quantiles at `nodes` from the wet-day quantiles qw (month, quantiles, lat, lon; equally spaced nodes) and
+    the dry-day fraction p0 (month, lat, lon): below p0 the dry days as the jitter of F1, uniform in (0, THRESH_PR)
+    (tau / p0 * THRESH_PR); above it, qw at the wet-day rank (tau - p0) / (1 - p0), linear between its nodes."""
+    w, p = np.asarray(qw, float), np.asarray(p0, float)[:, None]
+    nw = w.shape[1]
+    tau = np.asarray(nodes, float)[None, :, None, None]
+    u = np.clip((tau - p) / np.where(p < 1, 1 - p, 1.0), 0, 1)
+    s = np.clip(u * nw - 0.5, 0, nw - 1)
+    i0 = np.minimum(np.floor(np.nan_to_num(s)).astype(int), nw - 2)
+    f = s - i0
+    wet = np.take_along_axis(w, i0, 1) * (1 - f) + np.take_along_axis(w, i0 + 1, 1) * f
+    dry = THRESH_PR * tau / np.where(p > 0, p, 1.0)
+    out = np.where((tau < p) | (p >= 1), dry, wet)          # p0 = 1: no wet day, all dry
+    return np.where(np.isfinite(p), out, np.nan).astype("float32")
+
+
+def reference_quantiles(era5_fine, era5_coarse, f1_coarse, nq=NQUANTILES, nq_wet=NQUANTILES_PR,
+                        window_months=CAL_WINDOW_MONTHS, chunks_space=None):
+    """
+    Reference distribution of the RCM bias adjustment on the fine grid (alternative solution; BCSD principle, Wood et
+    al. 2004): ERA5 at the fine resolution plus the difference between the F1 product of the target run and ERA5 on the
+    coarse grid, interpolated to the fine grid (I), per calendar month m (window of window_months months) and quantile:
+      tasmax : Q_ref = Q_ERA5,fine + I[Q_F1 - Q_ERA5,coarse]
+      dtr    : Q_ref = Q_ERA5,fine x exp(I[log(Q_F1 / Q_ERA5,coarse)])          (dtr = tasmax - tasmin >= DTR_MIN)
+      pr     : dry-day fraction first, p0_ref = p0_ERA5,fine + I[p0_F1 - p0_ERA5,coarse] (in [0, 1]), then the wet-day
+               quantiles as dtr (ISIMIP3BASD principle, Lange 2019), combined into all-day quantiles whose dry part is
+               the jitter of F1, so that F2 is the same QDM 'jitter' as F1.
+    The RCM does not enter the reference. era5_fine, era5_coarse: dicts {'pr','tasmax','tasmin'} of daily ERA5 on the
+    fine grid and on the F1 grid over the calibration period of F1; f1_coarse: the F1 product of the target run over the
+    years of the RCM run. Returns a Dataset (computed) with q_pr, q_tasmax, q_dtr (month, quantiles, lat, lon) at the
+    nodes of a QDM training with nq quantiles, and p0_pr (month, lat, lon).
+    """
+    from xsdba.utils import equally_spaced_nodes
+    E, C, F = _as_keys(era5_fine), _as_keys(era5_coarse), _as_keys(f1_coarse)
+    like = next(iter(E.values()))
+    wq = lambda x, n, wet=False: window_quantiles(x, n, window_months, wet, chunks_space).compute()
+    out = {}
+    if "tasmax" in E:
+        out["q_tasmax"] = wq(E["tasmax"], nq) + interp_to(wq(F["tasmax"], nq) - wq(C["tasmax"], nq), like)
+    if "dtr" in E:
+        out["q_dtr"] = wq(E["dtr"], nq) * interp_to(wq(F["dtr"], nq) / wq(C["dtr"], nq), like, log=True)
+    if "pr" in E:
+        dry = lambda x: window_dry_fraction(x, window_months).compute()
+        p0 = (dry(E["pr"]) + interp_to(dry(F["pr"]) - dry(C["pr"]), like)).clip(0, 1)
+        qw = wq(E["pr"], nq_wet, True) * interp_to(wq(F["pr"], nq_wet, True) / wq(C["pr"], nq_wet, True), like, log=True)
+        nodes = equally_spaced_nodes(nq)
+        qa = _wet_to_all(qw.transpose("month", "quantiles", "lat", "lon").values,
+                         p0.transpose("month", "lat", "lon").values, nodes)
+        out["q_pr"] = xr.DataArray(qa, dims=("month", "quantiles", "lat", "lon"),
+                                   coords={"month": p0.month.values, "quantiles": nodes, "lat": like.lat, "lon": like.lon})
+        out["p0_pr"] = p0
+    ds = xr.Dataset({k: v.astype("float32") for k, v in out.items()})
+    ds.attrs.update({"window_months": window_months, "nquantiles": nq, "nquantiles_wet": nq_wet, "thresh_pr": THRESH_PR,
+                     "method": "Q_ERA5,fine + I[Q_F1 - Q_ERA5,coarse] (tasmax); ratios in log (dtr, pr wet days); "
+                               "pr dry-day fraction first"})
+    return ds
+
+
+def fit_F2(qref, hist, outdir, chunks_space=None, overwrite=False, progress=True):
+    """
+    F2 of the alternative solution: QDM per calendar month m (on the days of the window of qref) and per pixel of the
+    RCM run `hist` (dict {'pr','tasmax','tasmin'}, on the grid of qref) towards the reference quantiles `qref`
+    (reference_quantiles). The xsdba training (QuantileDeltaMapping.train) is run on hist (its quantiles hist_q, at the
+    nodes of qref) and its adjustment factors are then computed against qref with xsdba.utils.get_correction
+    (ref_q = qref). The parameter files have the format of fit_F (qdm_<k>.nc, pr_method 'jitter'), so that apply_F
+    applies F2 unchanged to the four RCM runs.
+    """
+    import time
+    from dask.diagnostics import ProgressBar
+    from xsdba.adjustment import QuantileDeltaMapping
+    from xsdba.utils import get_correction
+    chunks_space = chunks_space or {"lat": 32, "lon": 64}
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    w = int(qref.attrs["window_months"])
+    KIND = {"pr": "*", "tasmax": "+", "dtr": "*"}
+    for k, h in _as_keys(hist).items():
+        if f"q_{k}" not in qref:
+            continue
+        path = outdir / f"qdm_{k}.nc"
+        if path.exists() and not overwrite:
+            print(f"   [already done] {path.name}"); continue
+        if not same_grid(h, qref):
+            raise ValueError(f"{k}: the RCM and the reference quantiles are not on the same grid.")
+        h = h.assign_coords(lat=qref.lat.values, lon=qref.lon.values)
+        h = _prep(_jitter_dry(h, SEED_JITTER + 1) if k == "pr" else h, chunks_space)
+        q = qref[f"q_{k}"]
+        t0 = time.time()
+        per_month = []
+        for m in range(1, 13):
+            hm = _months(h, _window(m, w))
+            ds = QuantileDeltaMapping.train(hm, hm, nquantiles=q.quantiles.values, group="time", kind=KIND[k]).ds
+            ref_q = (q.sel(month=m, drop=True).assign_coords(quantiles=ds["quantiles"].values)
+                     .broadcast_like(ds["hist_q"]).transpose(*ds["hist_q"].dims))   # + the 'group' dim of xsdba
+            ds["af"] = get_correction(ds["hist_q"], ref_q, KIND[k]).transpose(*ds["af"].dims)
+            per_month.append(ds)
+        ds = xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13))
+        ds.attrs.update({"window_months": w, "reference": "reference quantiles of the alternative solution",
+                         **({"pr_method": "jitter", "thresh_pr": THRESH_PR} if k == "pr" else {})})
+        if progress:
+            with ProgressBar():
+                ds = ds.compute()
+        else:
+            ds = ds.compute()
+        ds.to_netcdf(path)
+        print(f"   {path.name} written in {(time.time() - t0) / 60:.1f} min")
+    print("F2 parameters written to", outdir)
