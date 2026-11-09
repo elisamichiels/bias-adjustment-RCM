@@ -34,6 +34,11 @@ CAL_WINDOW_MONTHS = 3   # QDM of month m trained on the days of the CAL_WINDOW_M
 PR_METHOD = "jitter"    # dry days of pr: "jitter" = values < THRESH_PR replaced by a uniform noise in (0, THRESH_PR) before
                         # a multiplicative QDM on all days, set back to 0 after (Cannon et al. 2015) | "wdf" = fixed WDF
                         # (frequency adaptation) + QDM on wet days only
+PR_JITTER = "random"    # order of the jittered dry days: "random" (F1, Cannon et al. 2015: uniform noise drawn at random)
+                        # | "ranked": the same uniform spread over (0, THRESH_PR), in the order of the values (the model's
+                        # trace amounts rank its dry days; test GCM_BA/6_test_jitter, 9 Nov 2026: JJA pr-tasmax Spearman
+                        # -0.237 -> -0.267, raw -0.279, ERA5 -0.330, calibration and signals unchanged)
+PR_JITTER_F2 = "ranked"   # jitter of F2 (fit_F2), retained after that test
 F1_VARIANT = f"w{CAL_WINDOW_MONTHS}m-{PR_METHOD}"   # tag of the F1 version, used in the folder and file names
 
 
@@ -718,8 +723,40 @@ def _jitter_dry(x, seed):
     return jitter_under_thresh(x, f"{THRESH_PR} mm/d")
 
 
+def _rank_spread(a, u, thr):
+    """Along the last axis (time): values < thr -> thr (r + u) / n, r = rank of the value among the n values < thr of the
+    pixel (ties, e.g. exact zeros, broken by u, uniform in (0, 1)): uniform over (0, thr) in the order of the values."""
+    dry = a < thr                                          # NaN -> False
+    order = np.lexsort((u, np.where(dry, a, np.inf)), axis=-1)
+    rank = np.empty_like(order)
+    np.put_along_axis(rank, order, np.broadcast_to(np.arange(a.shape[-1]), a.shape), axis=-1)
+    n = np.maximum(dry.sum(-1, keepdims=True), 1)
+    return np.where(dry, thr * (rank + u) / n, a).astype(np.float32)
+
+
+def _jitter_ranked(x, seed):
+    """Order-preserving jitter: the values < THRESH_PR spread uniformly over (0, THRESH_PR) as by _jitter_dry (same
+    distribution, so the same bounded QDM factors), but in the order of their own values instead of at random, so that
+    the dampest dry days (trace amounts) become wet first when QDM wets dry days (test GCM_BA/6_test_jitter)."""
+    x = x.copy().chunk({"time": -1}) if x.chunks is not None else x.copy()
+    x.attrs["units"] = "mm/d"
+    u = _rand(x, seed)
+    out = xr.apply_ufunc(_rank_spread, x, u, kwargs={"thr": THRESH_PR}, input_core_dims=[["time"], ["time"]],
+                         output_core_dims=[["time"]], dask="parallelized", output_dtypes=[np.float32])
+    out = out.transpose(*x.dims)
+    out.attrs["units"] = "mm/d"
+    return out
+
+
+def _jitter(x, seed, how):
+    """Jitter of the dry days of pr: how = "random" (_jitter_dry, F1) | "ranked" (_jitter_ranked)."""
+    if how not in ("random", "ranked"):
+        raise ValueError(f"pr jitter {how!r}: 'random' or 'ranked'")
+    return _jitter_ranked(x, seed) if how == "ranked" else _jitter_dry(x, seed)
+
+
 def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantiles_pr=NQUANTILES_PR, progress=True,
-          overwrite=False, window_months=CAL_WINDOW_MONTHS, pr_method=PR_METHOD):
+          overwrite=False, window_months=CAL_WINDOW_MONTHS, pr_method=PR_METHOD, pr_jitter=PR_JITTER):
     """
     Train a correction function F = QDM per calendar month and per pixel (+ WDF for pr if pr_method="wdf"). One xsdba
     training per month m (no grouping inside it, so that apply_F interpolates linearly between the quantiles), on the
@@ -733,8 +770,10 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
     ref, hist : dict {'pr','tasmax','tasmin'(,'rsds')} of DataArrays (time, lat, lon), same grids.
                 Any subset of the variables can be given (tasmin needs tasmax), e.g. {'pr'} for a first test.
                 Each variable may cover its own period (e.g. rsds shorter: ERA5 radiation from 2005).
+    pr_jitter (pr_method "jitter"): "random" (F1) | "ranked" (order-preserving, _jitter_ranked), kept in the attributes of
+    qdm_pr.nc so that apply_F jitters the runs the same way.
     Writes the parameters to outdir (qdm_pr.nc, qdm_tasmax.nc, qdm_dtr.nc (, qdm_rsds.nc), wdf_params.nc for "wdf"),
-    with the method in their attributes (window_months, pr_method).
+    with the method in their attributes (window_months, pr_method, pr_jitter).
     overwrite=False: parameter files already in outdir are kept (not recomputed).
     """
     import time
@@ -780,9 +819,9 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
     jobs = {}
     # --- pr: jitter of the dry days (Cannon et al. 2015), or WDF then QDM on wet days
     if "pr" in R and pr_method == "jitter":
-        print(f"pr: values < {THRESH_PR} mm/day jittered (Cannon et al. 2015), QDM on all days")
-        jobs["pr"] = (_prep(_jitter_dry(R["pr"], SEED_JITTER), chunks_space),
-                      _prep(_jitter_dry(H["pr"], SEED_JITTER + 1), chunks_space))
+        print(f"pr: values < {THRESH_PR} mm/day jittered ({pr_jitter}; Cannon et al. 2015), QDM on all days")
+        jobs["pr"] = (_prep(_jitter(R["pr"], SEED_JITTER, pr_jitter), chunks_space),
+                      _prep(_jitter(H["pr"], SEED_JITTER + 1, pr_jitter), chunks_space))
     elif "pr" in R:
         print("WDF: estimating the rule (once)")
         pr_r = _prep(R["pr"], chunks_space)
@@ -807,7 +846,7 @@ def fit_F(ref, hist, outdir, chunks_space=None, nquantiles=NQUANTILES, nquantile
                                                     nquantiles=nq, group="time", kind=KIND[k]).ds for m in range(1, 13)]
             ds = xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13))
             ds.attrs.update({"window_months": window_months,
-                             **({"pr_method": pr_method, "thresh_pr": THRESH_PR} if k == "pr" else {})})
+                             **({"pr_method": pr_method, "thresh_pr": THRESH_PR, "pr_jitter": pr_jitter} if k == "pr" else {})})
             _compute_save(ds, path)
     print("Parameters written to", outdir)
 
@@ -864,10 +903,12 @@ def apply_F(sim, Fdir, chunks_space=None, seed=SEED_WDF, interp="linear", pr_tai
             parts.append(a)
         return xr.concat(parts, dim="time").sortby("time")
 
-    pr_method = xr.open_dataset(Fdir / "qdm_pr.nc").attrs.get("pr_method", "wdf") if "pr" in S else None
+    pr_attrs = xr.open_dataset(Fdir / "qdm_pr.nc").attrs if "pr" in S else {}
+    pr_method = pr_attrs.get("pr_method", "wdf") if "pr" in S else None
+    pr_jitter = pr_attrs.get("pr_jitter", "random")      # the jitter of the training (files before 9 Nov 2026: random)
     if pr_method == "jitter":
         # Cannon et al. (2015): dry days jittered as in the training, QDM on all days, values < THRESH_PR set to 0
-        pr_j = _prep(_jitter_dry(S["pr"], seed), chunks_space)
+        pr_j = _prep(_jitter(S["pr"], seed, pr_jitter), chunks_space)
         pr_a = _adjust("pr", pr_j, tail=pr_tail).transpose(*pr_j.dims)
         out["pr"] = xr.where(pr_a < THRESH_PR, 0.0, pr_a)
         units.append(("pr", "mm/d"))
@@ -1134,14 +1175,15 @@ def reference_quantiles(era5_fine, era5_coarse, f1_coarse, nq=NQUANTILES, nq_wet
     return ds
 
 
-def fit_F2(qref, hist, outdir, chunks_space=None, overwrite=False, progress=True):
+def fit_F2(qref, hist, outdir, chunks_space=None, overwrite=False, progress=True, pr_jitter=PR_JITTER_F2):
     """
     F2 of the alternative solution: QDM per calendar month m (on the days of the window of qref) and per pixel of the
     RCM run `hist` (dict {'pr','tasmax','tasmin'}, on the grid of qref) towards the reference quantiles `qref`
     (reference_quantiles). The xsdba training (QuantileDeltaMapping.train) is run on hist (its quantiles hist_q, at the
     nodes of qref) and its adjustment factors are then computed against qref with xsdba.utils.get_correction
     (ref_q = qref). The parameter files have the format of fit_F (qdm_<k>.nc, pr_method 'jitter'), so that apply_F
-    applies F2 unchanged to the four RCM runs.
+    applies F2 unchanged to the four RCM runs. pr: jitter pr_jitter (default PR_JITTER_F2 = "ranked", test 6_test_jitter),
+    kept in the attributes so that apply_F uses it.
     """
     import time
     from dask.diagnostics import ProgressBar
@@ -1161,7 +1203,7 @@ def fit_F2(qref, hist, outdir, chunks_space=None, overwrite=False, progress=True
         if not same_grid(h, qref):
             raise ValueError(f"{k}: the RCM and the reference quantiles are not on the same grid.")
         h = h.assign_coords(lat=qref.lat.values, lon=qref.lon.values)
-        h = _prep(_jitter_dry(h, SEED_JITTER + 1) if k == "pr" else h, chunks_space)
+        h = _prep(_jitter(h, SEED_JITTER + 1, pr_jitter) if k == "pr" else h, chunks_space)
         q = qref[f"q_{k}"]
         t0 = time.time()
         per_month = []
@@ -1174,7 +1216,7 @@ def fit_F2(qref, hist, outdir, chunks_space=None, overwrite=False, progress=True
             per_month.append(ds)
         ds = xr.concat(per_month, dim="month").assign_coords(month=np.arange(1, 13))
         ds.attrs.update({"window_months": w, "reference": "reference quantiles of the alternative solution",
-                         **({"pr_method": "jitter", "thresh_pr": THRESH_PR} if k == "pr" else {})})
+                         **({"pr_method": "jitter", "thresh_pr": THRESH_PR, "pr_jitter": pr_jitter} if k == "pr" else {})})
         if progress:
             with ProgressBar():
                 ds = ds.compute()
