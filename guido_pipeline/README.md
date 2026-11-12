@@ -62,3 +62,21 @@ Trace of the pr jitter: 0.005 mm/day kept with ERA5 (test `GCM_BA/8_test_trace`,
   (DEL29FEB TRUE), time 23:00.
 - **GCM runs available** (`DROUGHTOBS/EC-Earth_hosing/stabilization-ssp585-{2025,2050}_{Original,Hosing}`): pr, psl,
   tasmax, tasmin (+ ta, ua, va, zg) daily, NH, 2075-2124 (2025) and 2100-2149 (2050).
+
+## Running it ourselves: what we learnt (13 Nov 2026)
+
+- **Run folders** are created by `_create_skeletons_files/create_skeleton.sh` from `downscaling.tar.gz` (template scripts
+  with placeholders XXPARAMSXX / XXSCRIPTXX); the generated scripts carry absolute paths under
+  `/eos/jeodpp/data/projects/DROUGHTATLAS/guido/downscaling/`, so a copy in our space needs a path rewrite.
+- **Execution**: HTCondor jobs (docker, `sudo -u droughtatlasproc condor_submit`) with the conda environment
+  `/mnt/jeoproc/envs/DROUGHTATLASPROC/anaconda3/envs/droughta` (CDO, R, Rscript, NCO). The user has no Condor access
+  (groups: users, JEODPP_notebook); outside Condor each task is `script_run.sh <cluster> <process> <args>` and could be
+  looped on JEO-lab, with our own CDO and an R with the packages of the R scripts.
+- **QDM smoothing** (`climate_smooth/climateSmoothDelta.sh`): `runmean,11` along the merged delta series, then per month.
+- **pr climate imprint is a different algorithm** (`climdown_cdo_pr_*/climate_imprint/climateImprint_condor.sh`):
+  ratio anomaly (`cdo div`) to the climatology; for each GCM day the best-correlated low-resolution CERRA anomaly day
+  within a 30-day block (whole field and NSPLIT x NSPLIT subgrids, Fisher z weighted by the anomaly); RSTAR = GCM anomaly
+  / CERRA low-res anomaly, remapped (`remapcon`) to high resolution; pr = RSTAR x CERRA high-res anomaly x CERRA
+  climatology; outlier mask > 5 x CERRA seasonal q90; hole filling in R. It uses precomputed CERRA seasonal climatology,
+  q90 and wet-day probability (`CERRA/downscaling/{climatology,quantiles,pwet}`): ERA5 versions are needed. So the pr
+  climate imprint already borrows the daily spatial pattern of a reanalysis day (an analogue-like step).
