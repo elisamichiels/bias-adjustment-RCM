@@ -1,10 +1,11 @@
 """
-prep_era5_daily.py - build DAILY ERA5 (pr, tasmax, tasmin, rsds) from the HOURLY ERA5 copy on BDAP.
+prep_era5_daily.py - build DAILY ERA5 (pr, tasmax, tasmin, rsds, psl) from the HOURLY ERA5 copy on BDAP.
 
 Source (one file per year and per variable, global 0.25 deg, hourly):
   <src>/total_precipitation/consolidated/<year>/<year>_cds_era5_total_precipitation.nc   (tp, m)
   <src>/2m_temperature/consolidated/<year>/<year>_cds_era5_2m_temperature.nc             (t2m, K)
   <src>/surface_solar_radiation_downwards/consolidated/<year>/...                        (ssrd, J m-2, from 2005 only)
+  <src>/mean_sea_level_pressure/consolidated/<year>/...                                  (msl, Pa)
 Only the 'consolidated' files are used (the 'nrt' near-real-time files are ignored).
 
 Daily values (UTC days, same definition as the CDS "ERA5 post-processed daily statistics", 1-hourly):
@@ -14,17 +15,20 @@ Daily values (UTC days, same definition as the CDS "ERA5 post-processed daily st
   tasmin = min of the same 24 values
   rsds   = sum of the 24 hourly ssrd accumulations valid from D 01:00 to D+1 00:00 (like tp), / 86400
            -> daily mean surface downwelling shortwave radiation in W m-2 (CMIP6 'rsds' units)
+  psl    = mean of the 24 hourly msl values from D 00:00 to D 23:00, Pa (daily mean, as CMIP6 'psl' of the
+           day table): the pressure field of the analogue step of the supervisor's pipeline
 Note: tasmax/tasmin from hourly t2m slightly underestimate the extremes compared with ERA5 mx2t/mn2t.
 
 Output (one file per year and per variable; names match the 'era5' pattern of notebook 00):
   <dst>/pr_ERA5_day_<year>.nc, <dst>/tasmax_ERA5_day_<year>.nc, <dst>/tasmin_ERA5_day_<year>.nc,
-  <dst>/rsds_ERA5_day_<year>.nc
+  <dst>/rsds_ERA5_day_<year>.nc, <dst>/psl_ERA5_day_<year>.nc
   original grid (lat 90..-90, lon 0..359.75): ba_utils.read_raw normalises it when reading.
 
 Usage (JEO-lab terminal, from the repository folder):
   python prep_era5_daily.py --start 1981 --end 1981                  # test on one year first
   nohup python prep_era5_daily.py --start 1981 --end 2025 > era5_daily.log 2>&1 &
   nohup python prep_era5_daily.py --start 2005 --end 2020 --vars rsds > era5_rsds.log 2>&1 &   # radiation
+  nohup python prep_era5_daily.py --start 1981 --end 2014 --vars psl > era5_psl.log 2>&1 &     # sea-level pressure
 Years already written are skipped, so the script can be stopped and restarted.
 """
 import argparse
@@ -48,7 +52,7 @@ from dask.diagnostics import ProgressBar
 SRC = "/eos/jeodpp/data/base/Meteo/GLOBAL/ECMWF/Reanalysis/ERA5/LATEST/Data/NetCDF"
 DST = "/eos/jeodpp/data/projects/DROUGHTOBS/elisa/GCM_downscaling/Input_data/ERA5_daily"
 SOURCES = {"pr": ("total_precipitation", "tp"), "tas": ("2m_temperature", "t2m"),
-           "rsds": ("surface_solar_radiation_downwards", "ssrd")}
+           "rsds": ("surface_solar_radiation_downwards", "ssrd"), "psl": ("mean_sea_level_pressure", "msl")}
 
 
 def src_file(src, folder, year):
@@ -65,6 +69,8 @@ def open_one(path, name):
     Contiguous files, e.g. t2m: one day of the whole globe at a time.
     """
     with xr.open_dataset(str(path)) as ds0:
+        if name not in ds0.data_vars and len(ds0.data_vars) == 1:   # variable named otherwise in some BDAP files
+            name = list(ds0.data_vars)[0]
         dims, stored = ds0[name].dims, ds0[name].encoding.get("chunksizes")
     if stored:
         chunks = dict(zip(dims, stored))
@@ -154,6 +160,15 @@ def do_year(year, src, dst, which):
                                   "daily minimum near-surface air temperature",
                                   "min of hourly t2m D 00:00 .. D 23:00 (UTC), -273.15",
                                   dst / f"tasmin_ERA5_day_{year}.nc"))
+    if "psl" in which:
+        folder, name = SOURCES["psl"]
+        cur = src_file(src, folder, year)
+        if not cur.exists():
+            print(f"  [skip psl {year}] {cur} not found")
+        else:
+            msl = hourly_block([cur], name, f"{year}-01-01 00:00", days.size)
+            jobs.append(write_job(to_daily(msl, "mean", days), "psl", "Pa", "daily mean sea-level pressure",
+                                  "mean of hourly msl D 00:00 .. D 23:00 (UTC)", dst / f"psl_ERA5_day_{year}.nc"))
     if not jobs:
         return
     with ProgressBar():
@@ -166,8 +181,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start", type=int, required=True)
     ap.add_argument("--end", type=int, required=True)
-    ap.add_argument("--vars", nargs="+", default=["pr", "tas"], choices=["pr", "tas", "rsds"],
-                    help="pr = precipitation, tas = tasmax + tasmin, rsds = solar radiation (ERA5 ssrd: from 2005)")
+    ap.add_argument("--vars", nargs="+", default=["pr", "tas"], choices=["pr", "tas", "rsds", "psl"],
+                    help="pr = precipitation, tas = tasmax + tasmin, rsds = solar radiation (ERA5 ssrd: from 2005), "
+                         "psl = sea-level pressure")
     ap.add_argument("--src", default=SRC)
     ap.add_argument("--dst", default=DST)
     ap.add_argument("--overwrite", action="store_true")
@@ -177,7 +193,7 @@ def main():
     for year in range(a.start, a.end + 1):
         outs = {"pr": [dst / f"pr_ERA5_day_{year}.nc"],
                 "tas": [dst / f"tasmax_ERA5_day_{year}.nc", dst / f"tasmin_ERA5_day_{year}.nc"],
-                "rsds": [dst / f"rsds_ERA5_day_{year}.nc"]}
+                "rsds": [dst / f"rsds_ERA5_day_{year}.nc"], "psl": [dst / f"psl_ERA5_day_{year}.nc"]}
         which = [v for v in a.vars if a.overwrite or not all(p.exists() for p in outs[v])]
         if not which:
             print(f"{year}: already done")
