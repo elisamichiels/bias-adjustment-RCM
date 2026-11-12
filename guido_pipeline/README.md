@@ -38,3 +38,27 @@ Trace of the pr jitter: 0.005 mm/day kept with ERA5 (test `GCM_BA/8_test_trace`,
   (`climate_analogs_condor_v1.sh`); the MSLP is remapped before the PCA. In step 2 the model (RCM) is on the 0.25 grid
   of the reference, so these remappings become identities: the climate imprint can be skipped. The analogue search
   would then run at 0.25 deg (much heavier than at the GCM grid).
+
+## Blocks 1 (climate imprint) and 2 (QDM), read in Guido's scripts (13 Nov 2026)
+
+- **Block 1, `climate_imprint/climateImprint_condor.sh`**, one task per calendar day (MONTH DAY): daily climatology of
+  the reference and of the GCM over CAL_START..CAL_END (`runmean,11` then `ydaymean`; the GCM uses CAL_START-1 and
+  CAL_END+1 as buffer years if present), anomaly = GCM - its climatology, remapped (`REMAP`) onto the reference grid,
+  added to the reference climatology (`sub` / `add` in the tasmax version: check the pr version, ratio expected).
+  Then `climateMergetimeImprint` (all days in one file) and `climateQDMImprint` (one file per month extended by 15 days
+  of the previous and next month).
+- **Block 2, `climate_qdm/`**: `climateQDMDelta_condor.sh`, one task per (QDM_START QDM_END MONTH) from the task
+  arguments: mp = CI output of QDM_START..QDM_END (the years corrected), mc = CI output of CAL_START..CAL_END, oc =
+  reference of CAL_START..CAL_END (month +- 15 days, aligned with mc); delta factors in R
+  (`quantile_delta_mapping_calculatefactors.R`); `climateQDMMergeDelta` merges them (expects exactly **108** files = 9
+  periods x 12 months: to change), then the smoothing (`climate_smooth/`, not read yet), then
+  `climateQDMApplyDelta_condor.sh` per (period, month) (`quantile_delta_mapping_applyfactors.R`), merge and postprocess.
+- **Years**: only `selyear` on CAL_START/CAL_END (params.sh) and QDM_START/QDM_END (task arguments). No loop over
+  continuous years: a GCM file historical 1981-2014 + run 2075-2124 works, no renumbering. For a stabilised run, one QDM
+  window = the whole run (e.g. `2075 2124 MM`), which is QDM without the 30-year moving windows.
+- **Inputs**: `${PATH_FILES}` must contain exactly **4** netCDF files (check in block 1): the reference variable
+  (`${VARNAME}*${REANALYSIS}*.nc`), the GCM variable (`${VARNAME}*${MODEL}*.nc`, historical + run in one file) and the
+  two MSLP anomaly files (not used by blocks 1-2: real or placeholder files, or edit the check). 365-day calendar
+  (DEL29FEB TRUE), time 23:00.
+- **GCM runs available** (`DROUGHTOBS/EC-Earth_hosing/stabilization-ssp585-{2025,2050}_{Original,Hosing}`): pr, psl,
+  tasmax, tasmin (+ ta, ua, va, zg) daily, NH, 2075-2124 (2025) and 2100-2149 (2050).
