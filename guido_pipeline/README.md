@@ -96,3 +96,15 @@ Trace of the pr jitter: 0.005 mm/day kept with ERA5 (test `GCM_BA/8_test_trace`,
 - Environment: CDO (not the BDAP one), R with terra, tidyverse, sf, ggspatial, scico, rnaturalearth (the delta factors
   are computed with the R package ClimDown), ncdump, ncview, python. Condor: `sudo -u droughtatlasproc condor_submit`.
 - The book covers tasmax, tasmin, tas (7 models x 3 SSPs); pr (its own climate imprint) is not documented.
+
+## pr workflow (sheet "pr" of `PHD_codes/downscaling.xlsx`, Guido's run log; done for all models and SSPs)
+
+Climate imprint: (0) `submit.condor.climatology`: GCM climatology and anomalies for step 1, and the reference
+quantiles and climatologies (8 one-step files in `out/ci/climatology`; computed once for CERRA with the MPI run and
+reused, but the low-resolution reference must be redone for each GCM grid); (1) `submit.condor.imprint`: daily climate
+imprint, values > 5 x reference q90 invalidated and refilled by a focal function (`fill_holes.R`); (5)
+`submit.condor.climatology2`: 4 extended SEASONAL files (seasons instead of months for pr); `submit.condor.fix_drizzle`:
+wet-day frequency of the seasonal files corrected before the QDM. QDM: qdm_delta (seasonal files), merge_delta,
+smooth_delta (run on JEO-desk), qdm_applydelta, postprocess1_qdm (4 seasonal files), postprocess2_qdm (outliers
+invalidated and refilled on short periods: `qdm_noholes`), postprocess3_qdm (12 monthly files), mergetime_monthly_qdm.
+For us: step 0 run with ERA5 produces the reference climatology, q90 and wet-day files itself (no CERRA files needed).
