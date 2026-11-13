@@ -10,6 +10,7 @@
 # Usage (JEO-desk terminal):  nohup bash ~/downscaling/guido_pipeline/setup_env.sh > ~/setup_env.log 2>&1 < /dev/null &
 set -euo pipefail
 ENV=$HOME/envs/guido
+export PROJ_LIB="$ENV/share/proj" PROJ_DATA="$ENV/share/proj"   # PROJ database (terra cannot find it otherwise)
 MM=$HOME/bin/micromamba; [ -x "$MM" ] || MM=micromamba
 PKGS="cdo nco libnetcdf python bc gawk r-base r-terra r-tidyverse r-ncdf4 r-irlba r-glue r-sf r-ggspatial r-scico
       r-rnaturalearth r-patchwork r-ragg r-factoextra r-pcict"

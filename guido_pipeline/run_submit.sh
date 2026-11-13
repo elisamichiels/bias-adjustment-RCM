@@ -13,7 +13,7 @@ SUB=$1
 [ -f "$SUB" ] || { echo "no submit file $SUB"; exit 1; }
 ENV=$HOME/envs/guido
 export PATH="$ENV/bin:$PATH"
-export PROJ_LIB="$ENV/share/proj"
+export PROJ_LIB="$ENV/share/proj" PROJ_DATA="$ENV/share/proj"   # PROJ database of the environment (terra fails without it)
 args=$(grep -E '^\s*arguments\s*=' "$SUB" | sed -E 's/^\s*arguments\s*=\s*//')
 script=$(echo "$args" | awk '{print $1}')
 tfile=$(grep -E '^\s*queue\s+task\s+from' "$SUB" | sed -E 's/.*from\s+//' | tr -d '\r')
