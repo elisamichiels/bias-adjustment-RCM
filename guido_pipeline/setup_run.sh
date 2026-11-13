@@ -70,6 +70,16 @@ else
     echo "pr: QDM task file left as in Guido's template (seasonal), to adapt after reading it"
 fi
 
+# 6. private temporary folder for the climate imprint jobs: the core script writes fixed names in /tmp
+#    (/tmp/anomaly.nc, /tmp/remapped_anom.nc ...), harmless under Condor (one /tmp per job) but two variables running at
+#    the same time on one machine would overwrite each other. Pure CDO script: every /tmp/ becomes a mktemp folder.
+CI="$D/climate_imprint/climateImprint_condor.sh"
+if [ -f "$CI" ] && ! grep -q "PRIVATE_TMP" "$CI"; then
+    sed -i -e 's|/tmp/|${PRIVATE_TMP}/|g' "$CI"
+    sed -i -e '0,/^JOBSUFFIX=/s|^JOBSUFFIX=.*|&\nPRIVATE_TMP=$(mktemp -d /tmp/ci_${VARNAME}_XXXXXX); trap '"'"'rm -rf "$PRIVATE_TMP"'"'"' EXIT|' "$CI"
+    grep -n "PRIVATE_TMP=" "$CI" || echo "WARNING: private tmp not inserted in $CI"
+fi
+
 echo "run folder: $D"
 echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"
