@@ -46,7 +46,7 @@ cd "$B" && bash "$S"
 
 # 3. paths of Guido's installation -> ours
 D="$B/climdown_cdo_${VAR}_${DOMAIN}_${MODEL}_${SCENARIO}"
-grep -rlI --exclude-dir=data -e "$G" -e /mnt/jeoproc/envs -e /scratch/droughtatlas "$D" | while read -r f; do
+{ grep -rlI --exclude-dir=data -e "$G" -e /mnt/jeoproc/envs -e /scratch/droughtatlas "$D" || true; } | while read -r f; do
     sed -i -e "s|$G|$B|g" -e "s|/mnt/jeoproc/envs/DROUGHTATLASPROC/anaconda3/envs/droughta|$ENV|g" \
            -e "s|/scratch/droughtatlas|$B/scratch|g" "$f"
 done
