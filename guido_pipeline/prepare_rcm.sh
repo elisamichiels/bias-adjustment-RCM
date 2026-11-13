@@ -5,6 +5,7 @@
 #   - the 300 monthly files of each variable merged (25 years);
 #   - dates: RegCM stamps the value of day D at D+1 00:00 (January file: 2nd January .. 1st February), shifted back by
 #     one day (shifttime,-1day), then time 23:00, 365-day calendar without 29 February (as Guido's inputs);
+#   - written as float32 at every step (-b F32: the RegCM files are packed, CDO overflowed when writing them back);
 #   - units of the reference: tasmax / tasmin K -> degC, pr kg m-2 s-1 -> mm/d; dtr = tasmax - tasmin;
 #   - remapped from the RegCM grid onto the ERA5 0.25 grid of the reference box (grid of the ERA5 reference file of
 #     prepare_inputs.sh): remapcon for pr (remapbil if the RegCM file has no cell corners), remapbil for the others.
@@ -42,7 +43,7 @@ merged() {   # $1 variable: the monthly files merged, dates shifted, 365-day cal
         *) echo "$v: unexpected units '$u'"; exit 1 ;;
     esac
     log "merge $v ($n files, units '$u')"
-    $C -O $STD $conv -selname,$v -mergetime "$SRC/$DIR/${v}_${PFX}_"[0-9][0-9][0-9][0-9][0-9][0-9].nc "$TMP/$v.nc"
+    $C -O -b F32 $STD $conv -selname,$v -mergetime "$SRC/$DIR/${v}_${PFX}_"[0-9][0-9][0-9][0-9][0-9][0-9].nc "$TMP/$v.nc"
 }
 
 for v in tasmax dtr pr; do
@@ -51,7 +52,7 @@ for v in tasmax dtr pr; do
     if [ "$v" = dtr ]; then
         [ -f "$TMP/tasmax.nc" ] || merged tasmax
         merged tasmin
-        $C -O -setattribute,dtr@units=degC -setname,dtr -sub "$TMP/tasmax.nc" "$TMP/tasmin.nc" "$TMP/dtr.nc"
+        $C -O -b F32 -setattribute,dtr@units=degC -setname,dtr -sub "$TMP/tasmax.nc" "$TMP/tasmin.nc" "$TMP/dtr.nc"
         m=remapbil
     else
         merged $v
@@ -60,12 +61,12 @@ for v in tasmax dtr pr; do
     log "remap $v ($m) onto the ERA5 0.25 grid"
     # the RegCM grid as a plain curvilinear grid (curv_griddes.txt of rcm_monthly): the rotated-pole grid mapping of the
     # files made CDO fail when writing (resizeBuf allocation); uncompressed output first, compressed afterwards
-    if ! $C -O -f nc4 $m,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"; then
+    if ! $C -O -f nc4 -b F32 $m,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"; then
         [ "$m" = remapcon ] || exit 1
         log "remapcon failed (no cell corners in the RegCM grid?): remapbil instead"
-        $C -O -f nc4 remapbil,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"
+        $C -O -f nc4 -b F32 remapbil,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"
     fi
-    $C -O -f nc4 -z zip_1 copy "$TMP/u.nc" "$TMP/x.nc" && rm -f "$TMP/u.nc"
+    $C -O -f nc4 -b F32 -z zip_1 copy "$TMP/u.nc" "$TMP/x.nc" && rm -f "$TMP/u.nc"
     mv "$TMP/x.nc" "$o"
 done
 
