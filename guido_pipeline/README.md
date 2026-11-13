@@ -80,3 +80,19 @@ Trace of the pr jitter: 0.005 mm/day kept with ERA5 (test `GCM_BA/8_test_trace`,
   climatology; outlier mask > 5 x CERRA seasonal q90; hole filling in R. It uses precomputed CERRA seasonal climatology,
   q90 and wet-day probability (`CERRA/downscaling/{climatology,quantiles,pwet}`): ERA5 versions are needed. So the pr
   climate imprint already borrows the daily spatial pattern of a reanalysis day (an analogue-like step).
+
+## Guido's documentation (book "CMIP6 Dowscaling", 16 Dec 2025, `DROUGHTATLAS/guido/downscaling/documentation/dowscaling/`)
+
+- Two independent blocks: (1) `climate_imprint` -> `climate_qdm` (delta) -> `climate_smooth` -> `climate_qdm` (apply,
+  postprocess, merge); (2) `climate_detrended_past/future` (DQM). Then `climate_pca` (PCA, HSMM, analogues, reranking)
+  needs both. Blocks 1 alone give the climate imprint + QDM product (`qdm/merged/qdm_01_12_*.nc`).
+- Block 1 submit order: imprint (365 jobs) -> [check_imprint: skip] -> mergetime_imprint (12) -> mergetime_monthly_imprint
+  (1) -> qdm_imprint (12, extended months) -> qdm_delta (108 = periods x months) -> merge_delta (1) -> smooth_delta (12)
+  -> qdm_applydelta (108) -> postprocess_qdm (12) -> mergetime_monthly_qdm (1). Integrity checks after each step
+  (`check_missing_layers`, `check_delta_no_missing_layers.sh`, `check_applydelta_no_missing_layers.sh`); the R steps
+  often produce files with empty layers, to regenerate.
+- Memory: 8 GB per job, except qdm_delta / qdm_applydelta (R, pixel-wise) 100-460 GB at CERRA 5 km; at ERA5 0.25 deg
+  (~25 times fewer pixels) roughly 4-20 GB.
+- Environment: CDO (not the BDAP one), R with terra, tidyverse, sf, ggspatial, scico, rnaturalearth (the delta factors
+  are computed with the R package ClimDown), ncdump, ncview, python. Condor: `sudo -u droughtatlasproc condor_submit`.
+- The book covers tasmax, tasmin, tas (7 models x 3 SSPs); pr (its own climate imprint) is not documented.
