@@ -10,13 +10,15 @@
 #     one day (shifttime,-1day), then time 23:00, 365-day calendar without 29 February (as Guido's inputs);
 #   - units of the reference: tasmax / tasmin K -> degC, pr kg m-2 s-1 -> mm/d (checked from the file units);
 #     dtr = tasmax - tasmin (after the remapping: bilinear interpolation is linear, so the same as remapping the
-#     difference); float32 at every step.
+#     difference); float32 at every step; intermediate files in NetCDF 64-bit offset format (-f nc2, no HDF5: the
+#     NetCDF4 writes of RegCM-derived data failed with "HDF error"), only the final files in compressed NetCDF4.
 #   ERA5 box points outside the RCM domain stay missing (counted in the check).
 # Output: guido_inputs/rcm_<tag>/<var>_RegCM5-<tag>_europe.nc ; outputs already written are skipped.
 # Expected check: 9125 steps (25 x 365), 2125-01-01 .. 2149-12-31, 303 x 199 points.
 # Usage (JEO-desk):  nohup bash ~/downscaling/guido_pipeline/prepare_rcm.sh stab2050nohos > ~/prepare_rcm.log 2>&1 < /dev/null &
 #                    tags: stab2050nohos (stabilization-ssp585-2050_Base), stab2050hos (stabilization-ssp585-2050_Hose)
 set -euo pipefail
+export HDF5_USE_FILE_LOCKING=FALSE
 TAG=${1:-stab2050nohos}
 C=~/envs/guido/bin/cdo; [ -x "$C" ] || C=~/envs/cdo/bin/cdo
 SRC=/eos/jeodpp/data/projects/DROUGHTOBS/rcm_monthly
@@ -55,9 +57,9 @@ monthly() {   # $1 variable: the 300 monthly files, remapped one by one, merged 
     log "$v: $n months, units '$u', remap$m"
     mkdir -p "$TMP/$v"
     for f in "${files[@]}"; do
-        $C -s -O -b F32 $STD $conv -remap,"$TARGET","$w" -selname,$v "$f" "$TMP/$v/$(basename "$f")"
+        $C -s -O -f nc2 -b F32 $STD $conv -remap,"$TARGET","$w" -selname,$v "$f" "$TMP/$v/$(basename "$f")"
     done
-    $C -s -O -b F32 mergetime "$TMP/$v"/*.nc "$TMP/$v.nc" && rm -rf "$TMP/$v"
+    $C -s -O -f nc2 -b F32 mergetime "$TMP/$v"/*.nc "$TMP/$v.nc" && rm -rf "$TMP/$v"
 }
 
 for v in tasmax dtr pr; do
