@@ -2,15 +2,16 @@
 # prepare_rcm.sh - RegCM5 0.25 daily runs (DROUGHTOBS/rcm_monthly, one file per month and variable, native rotated
 # curvilinear grid) in the format of the inputs of Guido's pipeline, for step 2 (QDM of the RCM against the GCM
 # ERA5-like product):
-#   - the 300 monthly files of each variable merged (25 years);
+#   - each monthly file remapped onto the ERA5 0.25 grid of the reference box (the grid of the ERA5 reference file of
+#     prepare_inputs.sh; weights computed once: remapcon for pr, or remapbil if the RegCM grid has no cell corners;
+#     remapbil for tasmax / tasmin), then the 300 remapped months merged. Remapping the merged 25-year file at once
+#     made CDO fail when writing (resizeBuf allocation error); month by month it works;
 #   - dates: RegCM stamps the value of day D at D+1 00:00 (January file: 2nd January .. 1st February), shifted back by
 #     one day (shifttime,-1day), then time 23:00, 365-day calendar without 29 February (as Guido's inputs);
-#   - written as float32 at every step (-b F32: the RegCM files are packed, CDO overflowed when writing them back);
-#   - units of the reference: tasmax / tasmin K -> degC, pr kg m-2 s-1 -> mm/d; dtr = tasmax - tasmin;
-#   - remapped from the RegCM grid onto the ERA5 0.25 grid of the reference box (grid of the ERA5 reference file of
-#     prepare_inputs.sh): remapcon for pr (remapbil if the RegCM file has no cell corners), remapbil for the others.
-#     The RegCM grid is set from rcm_monthly/curv_griddes.txt (plain curvilinear) before remapping.
-#     ERA5 box points outside the RCM domain stay missing (counted in the check).
+#   - units of the reference: tasmax / tasmin K -> degC, pr kg m-2 s-1 -> mm/d (checked from the file units);
+#     dtr = tasmax - tasmin (after the remapping: bilinear interpolation is linear, so the same as remapping the
+#     difference); float32 at every step.
+#   ERA5 box points outside the RCM domain stay missing (counted in the check).
 # Output: guido_inputs/rcm_<tag>/<var>_RegCM5-<tag>_europe.nc ; outputs already written are skipped.
 # Expected check: 9125 steps (25 x 365), 2125-01-01 .. 2149-12-31, 303 x 199 points.
 # Usage (JEO-desk):  nohup bash ~/downscaling/guido_pipeline/prepare_rcm.sh stab2050nohos > ~/prepare_rcm.log 2>&1 < /dev/null &
@@ -28,13 +29,12 @@ mkdir -p "$OUT" "$TMP"; trap 'rm -rf "$TMP"' EXIT
 STD="-settime,23:00:00 -setcalendar,365_day -del29feb -shifttime,-1day"
 log() { echo "$(date +%T) $*"; }
 [ -f "$TARGET" ] || { echo "missing $TARGET (run prepare_inputs.sh first)"; exit 1; }
-$C -s griddes "$TARGET" > "$TMP/target_grid.txt"
 
-merged() {   # $1 variable: the monthly files merged, dates shifted, 365-day calendar, in the units of the reference
-    local v=$1 n u conv
-    n=$(ls "$SRC/$DIR/${v}_${PFX}_"[0-9][0-9][0-9][0-9][0-9][0-9].nc | wc -l)
-    [ "$n" -eq 300 ] || { echo "$v: $n monthly files, 300 expected"; exit 1; }
-    u=$($C -s showunit "$SRC/$DIR/${v}_${PFX}_212501.nc" | xargs)
+monthly() {   # $1 variable: the 300 monthly files, remapped one by one, merged into $TMP/$1.nc (units of the reference)
+    local v=$1 n u conv m w f
+    mapfile -t files < <(ls "$SRC/$DIR/${v}_${PFX}_"[0-9][0-9][0-9][0-9][0-9][0-9].nc)
+    n=${#files[@]}; [ "$n" -eq 300 ] || { echo "$v: $n monthly files, 300 expected"; exit 1; }
+    u=$($C -s showunit "${files[0]}" | xargs)
     case "$v:$u" in
         pr:kg\ m-2\ s-1|pr:kg/m2/s|pr:kg\ m**-2\ s**-1) conv="-setattribute,pr@units=mm/d -mulc,86400" ;;
         pr:mm/d|pr:mm/day) conv="" ;;
@@ -42,32 +42,36 @@ merged() {   # $1 variable: the monthly files merged, dates shifted, 365-day cal
         tas*:degC|tas*:C) conv="" ;;
         *) echo "$v: unexpected units '$u'"; exit 1 ;;
     esac
-    log "merge $v ($n files, units '$u')"
-    $C -O -b F32 $STD $conv -selname,$v -mergetime "$SRC/$DIR/${v}_${PFX}_"[0-9][0-9][0-9][0-9][0-9][0-9].nc "$TMP/$v.nc"
+    m=bil; [ "$v" = pr ] && m=con
+    w="$TMP/weights_$m.nc"
+    if [ ! -f "$w" ]; then
+        if ! $C -O gen$m,"$TARGET" -selname,$v "${files[0]}" "$w"; then
+            [ "$m" = con ] || exit 1
+            log "gencon failed (no cell corners in the RegCM grid?): bilinear weights instead"
+            m=bil; w="$TMP/weights_bil.nc"
+            [ -f "$w" ] || $C -O genbil,"$TARGET" -selname,$v "${files[0]}" "$w"
+        fi
+    fi
+    log "$v: $n months, units '$u', remap$m"
+    mkdir -p "$TMP/$v"
+    for f in "${files[@]}"; do
+        $C -s -O -b F32 $STD $conv -remap,"$TARGET","$w" -selname,$v "$f" "$TMP/$v/$(basename "$f")"
+    done
+    $C -s -O -b F32 mergetime "$TMP/$v"/*.nc "$TMP/$v.nc" && rm -rf "$TMP/$v"
 }
 
 for v in tasmax dtr pr; do
     o="$OUT/${v}_RegCM5-${TAG}_europe.nc"
     [ -f "$o" ] && { log "present $o"; continue; }
     if [ "$v" = dtr ]; then
-        [ -f "$TMP/tasmax.nc" ] || merged tasmax
-        merged tasmin
-        $C -O -b F32 -setattribute,dtr@units=degC -setname,dtr -sub "$TMP/tasmax.nc" "$TMP/tasmin.nc" "$TMP/dtr.nc"
-        m=remapbil
+        [ -f "$TMP/tasmax.nc" ] || monthly tasmax
+        monthly tasmin
+        $C -O -f nc4 -b F32 -z zip_1 -setattribute,dtr@units=degC -setname,dtr -sub "$TMP/tasmax.nc" "$TMP/tasmin.nc" "$TMP/x.nc"
     else
-        merged $v
-        m=remapbil; [ "$v" = pr ] && m=remapcon
+        monthly $v
+        $C -O -f nc4 -b F32 -z zip_1 copy "$TMP/$v.nc" "$TMP/x.nc"
     fi
-    log "remap $v ($m) onto the ERA5 0.25 grid"
-    # the RegCM grid as a plain curvilinear grid (curv_griddes.txt of rcm_monthly): the rotated-pole grid mapping of the
-    # files made CDO fail when writing (resizeBuf allocation); uncompressed output first, compressed afterwards
-    if ! $C -O -f nc4 -b F32 $m,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"; then
-        [ "$m" = remapcon ] || exit 1
-        log "remapcon failed (no cell corners in the RegCM grid?): remapbil instead"
-        $C -O -f nc4 -b F32 remapbil,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"
-    fi
-    $C -O -f nc4 -b F32 -z zip_1 copy "$TMP/u.nc" "$TMP/x.nc" && rm -f "$TMP/u.nc"
-    mv "$TMP/x.nc" "$o"
+    mv "$TMP/x.nc" "$o"; log "written $o"
 done
 
 log "check"
