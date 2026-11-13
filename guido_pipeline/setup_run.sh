@@ -74,10 +74,12 @@ fi
 #    (/tmp/anomaly.nc, /tmp/remapped_anom.nc ...), harmless under Condor (one /tmp per job) but two variables running at
 #    the same time on one machine would overwrite each other. Pure CDO script: every /tmp/ becomes a mktemp folder.
 CI="$D/climate_imprint/climateImprint_condor.sh"
-if [ -f "$CI" ] && ! grep -q "PRIVATE_TMP" "$CI"; then
-    sed -i -e 's|/tmp/|${PRIVATE_TMP}/|g' "$CI"
-    sed -i -e '0,/^JOBSUFFIX=/s|^JOBSUFFIX=.*|&\nPRIVATE_TMP=$(mktemp -d /tmp/ci_${VARNAME}_XXXXXX); trap '"'"'rm -rf "$PRIVATE_TMP"'"'"' EXIT|' "$CI"
-    grep -n "PRIVATE_TMP=" "$CI" || echo "WARNING: private tmp not inserted in $CI"
+if [ -f "$CI" ]; then
+    grep -q 'PRIVATE_TMP}/' "$CI" || sed -i -e 's|/tmp/|${PRIVATE_TMP}/|g' "$CI"
+    # the folder is created right after fun.sh is sourced (params.sh, which defines VARNAME, is sourced before it)
+    grep -q 'PRIVATE_TMP=$(mktemp' "$CI" || \
+        sed -i -e '0,/^source .*fun\.sh/s|^source .*fun\.sh.*|&\nPRIVATE_TMP=$(mktemp -d /tmp/ci_${VARNAME}_XXXXXX); trap '"'"'rm -rf "$PRIVATE_TMP"'"'"' EXIT|' "$CI"
+    grep -n 'PRIVATE_TMP=$(mktemp' "$CI" || echo "WARNING: private tmp not inserted in $CI"
 fi
 
 echo "run folder: $D"
