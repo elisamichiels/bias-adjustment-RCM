@@ -82,6 +82,25 @@ if [ -f "$CI" ]; then
     grep -n 'PRIVATE_TMP=$(mktemp' "$CI" || echo "WARNING: private tmp not inserted in $CI"
 fi
 
+# 7. dtr MULTIPLICATIVE (our change to Guido's pipeline, as in F1): an additive climate imprint gave negative daily
+#    ranges (e.g. -4.7 degC on 1 January, ERA5 climatology + a large negative GCM anomaly); a ratio anomaly keeps dtr
+#    positive. Climate imprint: anomaly = GCM / GCM climatology (div), times the ERA5 climatology (mul); QDM: RATIO=TRUE,
+#    KIND=mult (the ratio branch of his R QDM only censors values below trace = 0.05, harmless for dtr).
+if [ "$VAR" = dtr ]; then
+    if [ -f "$CI" ] && ! grep -q "dtr multiplicative" "$CI"; then
+        sed -i -e 's|^\(\s*\${CDO}\) sub "\${PRIVATE_TMP}/\${1}" "\${PRIVATE_TMP}/\${2}" "\${PRIVATE_TMP}/anomaly.nc"|# dtr multiplicative (setup_run.sh): ratio anomaly instead of difference\n\1 div "${PRIVATE_TMP}/${1}" "${PRIVATE_TMP}/${2}" "${PRIVATE_TMP}/anomaly.nc"|' \
+               -e 's|^-add "\${PRIVATE_TMP}/remapped_anom.nc" \\|-mul "${PRIVATE_TMP}/remapped_anom.nc" \\|' "$CI"
+    fi
+    grep -n -E 'CDO\} (div|sub) "\$\{PRIVATE_TMP\}/\$\{1\}"|^-(mul|add) "\$\{PRIVATE_TMP\}/remapped_anom' "$CI"
+    if ! grep -q "dtr multiplicative" "$D/params.sh"; then
+        printf '\n# dtr multiplicative (setup_run.sh): ratio QDM, as the climate imprint\nif [[ "$VARNAME" == "dtr" ]]; then\n    KIND="mult"\n    RATIO=TRUE\nfi\n' >> "$D/params.sh.tmp_add"
+        # insert the block right after the KIND / RATIO / NQUANT / REMAP if-block (before GRID_GCM)
+        awk -v add="$(cat "$D/params.sh.tmp_add")" '/^GRID_GCM=/ && !done {print add; done=1} {print}' "$D/params.sh" > "$D/params.sh.new" \
+            && mv "$D/params.sh.new" "$D/params.sh"; rm -f "$D/params.sh.tmp_add"
+    fi
+    ( set +u; VARNAME=dtr; source <(sed -n '/^if \[\[ "\$VARNAME" == "pr"/,/^GRID_GCM=/p' "$D/params.sh" | grep -v '^GRID_GCM='); echo "dtr QDM: KIND=$KIND RATIO=$RATIO NQUANT=$NQUANT REMAP=$REMAP" )
+fi
+
 echo "run folder: $D"
 echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"
