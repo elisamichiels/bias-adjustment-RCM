@@ -8,6 +8,7 @@
 #   - units of the reference: tasmax / tasmin K -> degC, pr kg m-2 s-1 -> mm/d; dtr = tasmax - tasmin;
 #   - remapped from the RegCM grid onto the ERA5 0.25 grid of the reference box (grid of the ERA5 reference file of
 #     prepare_inputs.sh): remapcon for pr (remapbil if the RegCM file has no cell corners), remapbil for the others.
+#     The RegCM grid is set from rcm_monthly/curv_griddes.txt (plain curvilinear) before remapping.
 #     ERA5 box points outside the RCM domain stay missing (counted in the check).
 # Output: guido_inputs/rcm_<tag>/<var>_RegCM5-<tag>_europe.nc ; outputs already written are skipped.
 # Expected check: 9125 steps (25 x 365), 2125-01-01 .. 2149-12-31, 303 x 199 points.
@@ -57,11 +58,14 @@ for v in tasmax dtr pr; do
         m=remapbil; [ "$v" = pr ] && m=remapcon
     fi
     log "remap $v ($m) onto the ERA5 0.25 grid"
-    if ! $C -O -f nc4 -z zip_1 $m,"$TMP/target_grid.txt" "$TMP/$v.nc" "$TMP/x.nc"; then
+    # the RegCM grid as a plain curvilinear grid (curv_griddes.txt of rcm_monthly): the rotated-pole grid mapping of the
+    # files made CDO fail when writing (resizeBuf allocation); uncompressed output first, compressed afterwards
+    if ! $C -O -f nc4 $m,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"; then
         [ "$m" = remapcon ] || exit 1
-        log "remapcon failed (no cell corners in the RegCM file?): remapbil instead"
-        $C -O -f nc4 -z zip_1 remapbil,"$TMP/target_grid.txt" "$TMP/$v.nc" "$TMP/x.nc"
+        log "remapcon failed (no cell corners in the RegCM grid?): remapbil instead"
+        $C -O -f nc4 remapbil,"$TMP/target_grid.txt" -setgrid,"$SRC/curv_griddes.txt" "$TMP/$v.nc" "$TMP/u.nc"
     fi
+    $C -O -f nc4 -z zip_1 copy "$TMP/u.nc" "$TMP/x.nc" && rm -f "$TMP/u.nc"
     mv "$TMP/x.nc" "$o"
 done
 
