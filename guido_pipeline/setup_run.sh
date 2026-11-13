@@ -55,7 +55,23 @@ done
 sed -i -e 's|^REANALYSIS=.*|REANALYSIS="era5"|' -e 's|^CAL_START=.*|CAL_START="1981"|' -e 's|^CAL_END=.*|CAL_END="2014"|' \
        -e 's|^GLOBAL_START=.*|GLOBAL_START="1981"|' -e "s|^GLOBAL_END=.*|GLOBAL_END=\"${LASTYEAR[$RUN]}\"|" "$D/params.sh"
 
+# 5. QDM periods of a stabilised run (no trend: one period for the historical, one for the whole run, instead of
+#    Guido's 9 periods of 30 years), and the number of delta files expected by the merge (periods x 12 months)
+first_run_year=$((LASTYEAR[$RUN] - 49))
+Q="$D/climate_qdm/task_arguments_qdm_delta.txt"
+[ -f "$Q.guido" ] || cp "$Q" "$Q.guido"
+if [ "$VAR" != pr ]; then
+    for m in 01 02 03 04 05 06 07 08 09 10 11 12; do
+        printf "1981 2014 %s\n%s %s %s\n" "$m" "$first_run_year" "${LASTYEAR[$RUN]}" "$m"
+    done > "$Q"
+    sed -i 's/!= "108"/!= "24"/; s/expected 108 files/expected 24 files/' "$D/climate_qdm/climateQDMMergeDelta_condor.sh"
+    grep -n '"24"' "$D/climate_qdm/climateQDMMergeDelta_condor.sh" || echo "WARNING: merge_delta count not changed"
+else
+    echo "pr: QDM task file left as in Guido's template (seasonal), to adapt after reading it"
+fi
+
 echo "run folder: $D"
+echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"
 echo "remaining references to Guido's folder (expected: none, or only in climate_pca / analogue scripts):"
 grep -rlI --exclude-dir=data "$G" "$D" || true
