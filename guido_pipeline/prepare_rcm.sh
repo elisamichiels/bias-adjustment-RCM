@@ -10,6 +10,7 @@
 #     prepare_inputs.sh): remapcon for pr (remapbil if the RegCM file has no cell corners), remapbil for the others.
 #     ERA5 box points outside the RCM domain stay missing (counted in the check).
 # Output: guido_inputs/rcm_<tag>/<var>_RegCM5-<tag>_europe.nc ; outputs already written are skipped.
+# Expected check: 9125 steps (25 x 365), 2125-01-01 .. 2149-12-31, 303 x 199 points.
 # Usage (JEO-desk):  nohup bash ~/downscaling/guido_pipeline/prepare_rcm.sh stab2050nohos > ~/prepare_rcm.log 2>&1 < /dev/null &
 #                    tags: stab2050nohos (stabilization-ssp585-2050_Base), stab2050hos (stabilization-ssp585-2050_Hose)
 set -euo pipefail
@@ -69,7 +70,7 @@ for f in "$OUT"/*_europe.nc; do
     d=$($C -s showdate "$f" | tr -s ' ' '\n' | grep -v '^$')
     echo "$(basename "$f"): $($C -s ntime "$f") steps, $(echo "$d" | head -1) .. $(echo "$d" | tail -1), $($C -s showname "$f"), units $($C -s showunit "$f" | xargs)," \
          "grid $($C -s griddes "$f" | grep -E '^(xsize|ysize)' | tr -s ' ' | tr '\n' ' ')," \
-         "missing share (first day) $($C -s outputf,%.3f,1 -fldmean -setmisstoc,1 -expr,'m=missval(x)' -seltimestep,1 "$f" 2>/dev/null || echo n/a)," \
+         "missing cells (first day) $($C -s outputf,%.0f,1 -fldsum -setmisstoc,1 -setrtoc,-1e30,1e30,0 -seltimestep,1 "$f")," \
          "mean $($C -s outputf,%.2f,1 -timmean -fldmean "$f")"
 done
 echo PREPARE_RCM_DONE
