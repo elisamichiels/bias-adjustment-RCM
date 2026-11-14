@@ -101,6 +101,35 @@ if [ "$VAR" = dtr ]; then
     grep -n -A4 "dtr multiplicative" "$D/params.sh" || echo "WARNING: dtr ratio block not found in params.sh"
 fi
 
+# 8. temporary files of the other block-1 scripts (merges, QDM, smoothing) on EOS instead of /tmp: on JEO-desk the
+#    per-user quota of /tmp is about 5 GB (Disk quota exceeded) and these steps write files of several GB with fixed
+#    names. Each core script gets a private folder ${SCRATCH}/tmp_<var>_XXXXXX (SCRATCH = $B/scratch on EOS, from
+#    params.sh), exported so that the R scripts it calls use it too; the R scripts read "/tmp/x" as
+#    file.path(Sys.getenv("PRIVATE_TMP", "/tmp"), "x") (unchanged behaviour when the variable is not set).
+for f in "$D"/climate_imprint/*.sh "$D"/climate_qdm/*.sh "$D"/climate_smooth/*.sh; do
+    case "$(basename "$f")" in script_run*|climateImprint_condor.sh) continue ;; esac
+    grep -q "/tmp/" "$f" || continue
+    grep -q 'PRIVATE_TMP}/' "$f" || sed -i -e 's|/tmp/|${PRIVATE_TMP}/|g' "$f"
+    if ! grep -q 'PRIVATE_TMP=$(mktemp' "$f"; then
+        if grep -q '^source .*fun\.sh' "$f"; then
+            sed -i -e '0,/^source .*fun\.sh/s|^source .*fun\.sh.*|&\nexport PRIVATE_TMP=$(mktemp -d ${SCRATCH}/tmp_${VARNAME}_XXXXXX); trap '"'"'rm -rf "$PRIVATE_TMP"'"'"' EXIT|' "$f"
+        else
+            echo "WARNING: $f uses /tmp but does not source fun.sh: not patched, check it"
+            sed -i -e 's|${PRIVATE_TMP}/|/tmp/|g' "$f"
+        fi
+    fi
+done
+for f in "$D"/R_scripts/*.R; do
+    grep -q -E "[\"']/tmp/" "$f" || continue
+    sed -i -E -e "s#\"/tmp/([^\"]*)\"#file.path(Sys.getenv(\"PRIVATE_TMP\", \"/tmp\"), \"\1\")#g" \
+              -e "s#'/tmp/([^']*)'#file.path(Sys.getenv(\"PRIVATE_TMP\", \"/tmp\"), \"\1\")#g" "$f"
+done
+echo "block-1 scripts with a private temporary folder on EOS:"
+grep -l 'PRIVATE_TMP=$(mktemp -d ${SCRATCH}' "$D"/climate_imprint/*.sh "$D"/climate_qdm/*.sh "$D"/climate_smooth/*.sh 2>/dev/null | xargs -r -n1 basename || true
+echo "R scripts reading PRIVATE_TMP:"; grep -l 'Sys.getenv("PRIVATE_TMP"' "$D"/R_scripts/*.R 2>/dev/null | xargs -r -n1 basename || true
+echo "remaining /tmp/ in block-1 core scripts (expected: only climateImprint_condor.sh mktemp):"
+grep -n "/tmp/" "$D"/climate_imprint/*.sh "$D"/climate_qdm/*.sh "$D"/climate_smooth/*.sh | grep -v "script_run" || true
+
 echo "run folder: $D"
 echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"

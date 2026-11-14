@@ -13,6 +13,7 @@ SUB=$1
 [ -f "$SUB" ] || { echo "no submit file $SUB"; exit 1; }
 ENV=$HOME/envs/guido
 export PATH="$ENV/bin:$PATH"
+export HDF5_USE_FILE_LOCKING=FALSE                                 # EOS refuses HDF5 file locks
 export PROJ_LIB="$ENV/share/proj" PROJ_DATA="$ENV/share/proj"   # PROJ database of the environment (terra fails without it)
 args=$(grep -E '^\s*arguments\s*=' "$SUB" | sed -E 's/^\s*arguments\s*=\s*//')
 script=$(echo "$args" | awk '{print $1}')
