@@ -26,7 +26,7 @@ INP=/eos/jeodpp/data/projects/DROUGHTOBS/elisa/GCM_downscaling/guido_inputs
 declare -A DIRS=([stab2050nohos]="stabilization-ssp585-2050_Base 2050_Base" [stab2050hos]="stabilization-ssp585-2050_Hose 2050_Hose")
 read -r DIR PFX <<< "${DIRS[$TAG]}"
 TARGET="$INP/era5/tasmax_era5_1981_2014_europe.nc"      # ERA5 0.25 grid of the reference box
-OUT="$INP/rcm_$TAG"; TMP=${TMPDIR:-/tmp}/prep_rcm_$$
+OUT="$INP/rcm_$TAG"; TMP="$INP/tmp_prep_rcm_$$"   # on EOS: the per-user quota of /tmp on JEO-desk is too small (Disk quota exceeded)
 mkdir -p "$OUT" "$TMP"; trap 'rm -rf "$TMP"' EXIT
 STD="-settime,23:00:00 -setcalendar,365_day -del29feb -shifttime,-1day"
 log() { echo "$(date +%T) $*"; }

@@ -98,7 +98,7 @@ if [ "$VAR" = dtr ]; then
         awk -v add="$(cat "$D/params.sh.tmp_add")" '/^GRID_GCM=/ && !done {print add; done=1} {print}' "$D/params.sh" > "$D/params.sh.new" \
             && mv "$D/params.sh.new" "$D/params.sh"; rm -f "$D/params.sh.tmp_add"
     fi
-    ( set +u; VARNAME=dtr; source <(sed -n '/^if \[\[ "\$VARNAME" == "pr"/,/^GRID_GCM=/p' "$D/params.sh" | grep -v '^GRID_GCM='); echo "dtr QDM: KIND=$KIND RATIO=$RATIO NQUANT=$NQUANT REMAP=$REMAP" )
+    grep -n -A4 "dtr multiplicative" "$D/params.sh" || echo "WARNING: dtr ratio block not found in params.sh"
 fi
 
 echo "run folder: $D"
