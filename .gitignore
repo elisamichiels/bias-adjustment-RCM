@@ -25,3 +25,6 @@ plan_B/3_validations/**/outputs/
 
 # Outputs of the GCM_BA verification notebook (figures, tables)
 GCM_BA/**/outputs/
+
+# Outputs of the RCM check notebooks (figures, tables)
+rcm_check/**/outputs/
