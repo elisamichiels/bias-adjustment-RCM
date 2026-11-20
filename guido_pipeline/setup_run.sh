@@ -66,6 +66,10 @@ if [ "$VAR" != pr ]; then
     done > "$Q"
     sed -i 's/!= "108"/!= "24"/; s/expected 108 files/expected 24 files/' "$D/climate_qdm/climateQDMMergeDelta_condor.sh"
     grep -n '"24"' "$D/climate_qdm/climateQDMMergeDelta_condor.sh" || echo "WARNING: merge_delta count not changed"
+    # postprocess_qdm merges, per month, one unique_qdm file per period: 2 periods instead of Guido's 9
+    NPER=$(awk '{print $1, $2}' "$Q" | sort -u | wc -l)
+    sed -i -E "s/-ne 9 \]\];then/-ne $NPER ]];then/; s/instead of 9,/instead of $NPER,/" "$D/climate_qdm/climatePostprocessQDM_condor.sh"
+    grep -n -- "-ne $NPER ]]" "$D/climate_qdm/climatePostprocessQDM_condor.sh" || echo "WARNING: postprocess_qdm count not changed"
 else
     echo "pr: QDM task file left as in Guido's template (seasonal), to adapt after reading it"
 fi
