@@ -70,6 +70,8 @@ if [ "$VAR" != pr ]; then
     NPER=$(awk '{print $1, $2}' "$Q" | sort -u | wc -l)
     sed -i -E "s/-ne 9 \]\];then/-ne $NPER ]];then/; s/instead of 9,/instead of $NPER,/" "$D/climate_qdm/climatePostprocessQDM_condor.sh"
     grep -n -- "-ne $NPER ]]" "$D/climate_qdm/climatePostprocessQDM_condor.sh" || echo "WARNING: postprocess_qdm count not changed"
+    # smoothing of the deltas within each period (ours do not follow each other: 2014, then the run)
+    bash "$(dirname "$(readlink -f "$0")")/patch_smooth_per_period.sh" "$D"
 else
     echo "pr: QDM task file left as in Guido's template (seasonal), to adapt after reading it"
 fi
