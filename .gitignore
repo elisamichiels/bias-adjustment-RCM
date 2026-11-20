@@ -28,3 +28,6 @@ GCM_BA/**/outputs/
 
 # Outputs of the RCM check notebooks (figures, tables)
 rcm_check/**/outputs/
+
+# Outputs of the step-1 check notebooks (figures, tables)
+step1_check/**/outputs/
