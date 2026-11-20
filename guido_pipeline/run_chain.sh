@@ -5,12 +5,17 @@
 # Usage (JEO-desk):
 #   nohup bash ~/downscaling/guido_pipeline/run_chain.sh <dir>/submit.condor.a <dir>/submit.condor.b ... \
 #         > ~/chain.log 2>&1 < /dev/null &
-#   WAIT_PID=<pid> WAIT_LOG=<log> ...   first waits for that process (e.g. a run_submit.sh already running) to end,
-#                                       and goes on only if its log reports "0 failed"
+#   WAIT_PID=<pid> WAIT_LOG=<log> ...   first waits for that process (a run_submit.sh or another run_chain.sh already
+#                                       running) to end, and goes on only if its log reports success (CHAIN_DONE, or a
+#                                       last run_submit.sh summary with 0 failed)
 # Ends with CHAIN_DONE, or CHAIN_STOPPED and the name of the step that failed.
 set -uo pipefail
 HERE=$(dirname "$(readlink -f "$0")")
-ok_log() { grep -q -E ': [0-9]+ ok, 0 failed' "$1"; }   # summary line of run_submit.sh without failures
+ok_log() {   # log of a chain (CHAIN_DONE / CHAIN_STOPPED) or of run_submit.sh (its last summary line without failures)
+    grep -q CHAIN_STOPPED "$1" && return 1
+    grep -q CHAIN_DONE "$1" && return 0
+    grep -E ': [0-9]+ ok, [0-9]+ failed' "$1" | tail -n 1 | grep -q ', 0 failed'
+}
 
 if [ -n "${WAIT_PID:-}" ]; then
     echo "$(date +%T) waiting for process $WAIT_PID"
