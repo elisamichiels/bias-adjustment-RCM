@@ -20,9 +20,9 @@ ok_log() {   # log of a chain (CHAIN_DONE / CHAIN_STOPPED) or of run_submit.sh (
 if [ -n "${WAIT_PID:-}" ]; then
     echo "$(date +%T) waiting for process $WAIT_PID"
     while kill -0 "$WAIT_PID" 2>/dev/null; do sleep 60; done
-    if [ -n "${WAIT_LOG:-}" ] && ! ok_log "$WAIT_LOG"; then
-        echo "$(date +%T) CHAIN_STOPPED: $WAIT_LOG does not report 0 failed"; exit 1
-    fi
+fi
+if [ -n "${WAIT_LOG:-}" ] && ! ok_log "$WAIT_LOG"; then   # also without WAIT_PID (process already ended)
+    echo "$(date +%T) CHAIN_STOPPED: $WAIT_LOG does not report success"; exit 1
 fi
 for sub in "$@"; do
     [ -f "$sub" ] || { echo "$(date +%T) CHAIN_STOPPED: no submit file $sub"; exit 1; }
