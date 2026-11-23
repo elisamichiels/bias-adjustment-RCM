@@ -136,6 +136,15 @@ echo "R scripts reading PRIVATE_TMP:"; grep -l 'Sys.getenv("PRIVATE_TMP"' "$D"/R
 echo "remaining /tmp/ in block-1 core scripts (expected: only climateImprint_condor.sh mktemp):"
 grep -n "/tmp/" "$D"/climate_imprint/*.sh "$D"/climate_qdm/*.sh "$D"/climate_smooth/*.sh | grep -v "script_run" || true
 
+# 9. no -invertlat after the R steps of the QDM: Guido's inputs are stored south -> north and his scripts always flip
+#    the R output back to that order; our inputs (prepare_inputs.sh, from ERA5) are stored north -> south, so the flip
+#    put every factor at its mirror latitude (Nov 2026: the Barents sea-ice warming, up to +34 K, appeared in Arabia).
+#    The ranking / analogue scripts have the same flip: to be removed and tested if the analogue block is run.
+for f in "$D"/climate_qdm/climateQDMDelta_condor.sh "$D"/climate_qdm/climateQDMApplyDelta_condor.sh; do
+    sed -i -E '/^\s*#/! s/ -invertlat / /' "$f"
+    grep -q -E '^[^#]*invertlat' "$f" && echo "WARNING: invertlat left in $(basename "$f")"
+done
+
 echo "run folder: $D"
 echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"
