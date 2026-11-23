@@ -55,7 +55,7 @@ fi
 # it checks whether an output file already exists are ignored
 job_failed() {   # $1 .err file, $2 .out file
     grep -v -E 'HDF5-DIAG|^ +#[0-9]+:|^ +major:|^ +minor:' "$1" | \
-        grep -q -i -E 'disk quota|abort|file error|cdi +error|error \(|cannot allocate|open failed|segmentation|killed|permission denied' \
+        grep -q -i -E 'disk quota|abort|file error|cdi +error|error \(|cannot allocate|open failed|segmentation|killed|permission denied|cannot stat|enter timesteps' \
     || grep -q -i -E 'abort|file error' "$2"
 }
 # PARALLEL=N runs N jobs at a time: only for core scripts whose temporary files are in a private folder (setup_run.sh

@@ -38,4 +38,8 @@ EOF
         "$F" > "$F.new"
     mv "$F.new" "$F"; rm -f "$F.block"
 fi
+# the block writes unique_delta in PRIVATE_TMP; the dtr template moves it from TMP="." (mv "${TMP}/unique_delta_..."),
+# where it is not: the 12 smoothing jobs ended "ok" without writing their output (Nov 2026)
+sed -i 's|^mv "${TMP}/unique_delta_|cp "${PRIVATE_TMP}/unique_delta_|' "$F"
+grep -n -E '^(mv|cp) .*unique_delta_' "$F"
 grep -n -A13 "smoothing per QDM period" "$F" | head -n 14
