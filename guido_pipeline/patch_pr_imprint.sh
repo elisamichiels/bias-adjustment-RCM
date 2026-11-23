@@ -62,6 +62,11 @@ sed -i 's|pwet_pr_cerra_1985_2014_daysum_remapped_no29feb_europe_${SEASON}\.nc|p
 # 5. hole filling on the 0.25 deg grid
 sed -i -E 's/^param1<-0\.1$/param1<-0.25/; s/^param2<-0\.1$/param2<-0.3/' "$D/R_scripts/fill_holes.R"
 
+# 5b. ERA5 climatology not smoothed: his kernel for the reference, (1, 0.1) deg, is one cell at 0.25 deg (no smoothing)
+#     and the R smoothing fails on it ("File not found, abort!"); a 3 x 3 kernel would blur the reference over 75 km
+#     (his 0.1 deg was about 15 km on CERRA). The climatology is copied under the "smooth" name read by the imprint.
+sed -i 's@^smooth_climatology "${CERRA_CLIMATOLOGY}" "${PARAM1_CERRA}" "${PARAM2_CERRA}".*@cp "${CERRA_CLIMATOLOGY}" "${PATH_OUT_FILES_ci}/climatology/$(basename "${CERRA_CLIMATOLOGY}" | sed "s/climatology/smooth_climatology/g")"   # patch_pr_imprint.sh: ERA5 not smoothed@' "$CI/climateClimatology_condor.sh"
+
 # 6. imprint tasks: blocks of consecutive years, 2 in the calibration period and 3 in the run
 blocks() {   # first last n: n blocks of consecutive years
     local a=$1 b=$2 n=$3 len k
@@ -89,5 +94,6 @@ echo "invertlat left (code lines):"; grep -n -E '^[^#]*invertlat' "$CI"/*.sh || 
 echo "CERRA folder left (code lines):"; grep -n -E '^[^#]*CERRA/downscaling' "$CI"/*.sh "$D/params.sh" || echo "  none"
 grep -n -E '^PATH_OUT_FILES_(cq|cli|pwet)=' "$D/params.sh"
 grep -n -E '^param[12]<-' "$D/R_scripts/fill_holes.R"
+echo "smoothing of the climatologies:"; grep -n -E '^(smooth_climatology|cp "\$\{CERRA_CLIMATOLOGY\}")' "$CI/climateClimatology_condor.sh"
 grep -n 'pwet_\${OBS_model' "$CI/climateFixGcmDrizzle_condor.sh" "$CI/climateClimatology_condor.sh"
 echo PATCH_PR_IMPRINT_DONE

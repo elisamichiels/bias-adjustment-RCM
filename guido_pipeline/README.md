@@ -121,7 +121,9 @@ Order: `climatology` (4 seasons) -> `imprint` (365 days x 5 blocks of consecutiv
   climatology step writes them; the wet-day probability (his CERRA files: `cdo divc,<days> -timsum -gec,0.1` on the
   extended season, made by hand) is computed at the end of the climatology step from ERA5 1981-2014.
 - `fill_holes.R`: kernel (0.1, 0.1) deg = 1 x 1 cell at 0.25 deg (terra focalMat), so the values > 5 x q90 were never
-  refilled; (0.25, 0.3) = 3 x 3. Smoothing of the climatologies: ERA5 (1, 0.1) = 1 x 1 (none), EC-Earth3 (1, 2.7) = 7 x 7.
+  refilled; (0.25, 0.3) = 3 x 3. Smoothing of the climatologies: EC-Earth3 (1, 2.7) = 7 x 7; ERA5 (1, 0.1) = 1 x 1, on which
+  the R smoothing fails: the ERA5 climatology is used unsmoothed (copied under the "smooth" name; a 3 x 3 kernel would
+  blur it over 75 km).
 - The imprint sets a yearly time axis on each output: blocks of years must be consecutive (1981-1997, 1998-2014 and
   three blocks of the run), never across the gap between 2014 and the run.
 - `fix_drizzle`: per cell, values below the quantile (1 - pwet of ERA5) of the WHOLE imprint series (calibration and
