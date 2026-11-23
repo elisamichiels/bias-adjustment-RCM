@@ -114,7 +114,9 @@ fi
 #    file.path(Sys.getenv("PRIVATE_TMP", "/tmp"), "x") (unchanged behaviour when the variable is not set).
 for f in "$D"/climate_imprint/*.sh "$D"/climate_qdm/*.sh "$D"/climate_smooth/*.sh; do
     case "$(basename "$f")" in script_run*|climateImprint_condor.sh) continue ;; esac
-    grep -q "/tmp/" "$f" || continue
+    # also the scripts that use PRIVATE_TMP without /tmp/ left (e.g. climateSmoothDelta.sh of the dtr template, whose
+    # only temporary files are those of the block of patch_smooth_per_period.sh, step 5)
+    grep -q -e "/tmp/" -e 'PRIVATE_TMP}/' "$f" || continue
     grep -q 'PRIVATE_TMP}/' "$f" || sed -i -e 's|/tmp/|${PRIVATE_TMP}/|g' "$f"
     if ! grep -q 'PRIVATE_TMP=$(mktemp' "$f"; then
         if grep -q '^source .*fun\.sh' "$f"; then
