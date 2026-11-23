@@ -6,6 +6,7 @@
 # Usage (inside a climate_* folder of a run created by setup_run.sh):
 #   bash ~/downscaling/guido_pipeline/run_submit.sh submit.condor.imprint
 #   nohup bash ~/downscaling/guido_pipeline/run_submit.sh submit.condor.imprint > ~/imprint.log 2>&1 < /dev/null &
+# PARALLEL=6 bash run_submit.sh ... runs 6 jobs at a time (see below when it is safe).
 # Prints one line per job (ok / FAILED, seconds) and a summary; failed jobs can be rerun with the same command
 # restricted to their lines (ONLY_LINES="3 17" bash run_submit.sh ...), or, for the climate imprint, only the days whose
 # output is missing or incomplete (ONLY_MISSING_CI=1 bash run_submit.sh submit.condor.imprint).
@@ -57,19 +58,32 @@ job_failed() {   # $1 .err file, $2 .out file
         grep -q -i -E 'disk quota|abort|file error|cdi +error|error \(|cannot allocate|open failed|segmentation|killed|permission denied' \
     || grep -q -i -E 'abort|file error' "$2"
 }
-nok=0; nfail=0; failed=()
-for i in "${!lines[@]}"; do
-    if [ -n "${ONLY_LINES:-}" ] && ! [[ " $ONLY_LINES " == *" $((i + 1)) "* ]]; then continue; fi
+# PARALLEL=N runs N jobs at a time: only for core scripts whose temporary files are in a private folder (setup_run.sh
+# steps 6 and 8, patch_pr_imprint.sh); the status of each job goes to a file, so the summary is the same either way
+STAT=$(mktemp -d); trap 'rm -rf "$STAT"' EXIT
+run_job() {   # $1 index of the task line
+    local i=$1 t0 rc st
     t0=$(date +%s)
     # shellcheck disable=SC2086
     bash "$script" 0 "$i" ${lines[$i]} > "$LOG/${name}_$((i + 1)).out" 2> "$LOG/${name}_$((i + 1)).err"
     rc=$?
-    if [ $rc -eq 0 ] && ! job_failed "$LOG/${name}_$((i + 1)).err" "$LOG/${name}_$((i + 1)).out"; then
-        nok=$((nok + 1)); st=ok
-    else
-        nfail=$((nfail + 1)); failed+=($((i + 1))); st=FAILED
-    fi
+    if [ $rc -eq 0 ] && ! job_failed "$LOG/${name}_$((i + 1)).err" "$LOG/${name}_$((i + 1)).out"; then st=ok; else st=FAILED; fi
+    echo "$st" > "$STAT/$((i + 1))"
     echo "$(date +%T) job $((i + 1))/${#lines[@]} [${lines[$i]}] $st ($(( $(date +%s) - t0 )) s)"
+}
+NPAR=${PARALLEL:-1}
+for i in "${!lines[@]}"; do
+    if [ -n "${ONLY_LINES:-}" ] && ! [[ " $ONLY_LINES " == *" $((i + 1)) "* ]]; then continue; fi
+    if [ "$NPAR" -gt 1 ]; then
+        while [ "$(jobs -rp | wc -l)" -ge "$NPAR" ]; do wait -n; done
+        run_job "$i" &
+    else
+        run_job "$i"
+    fi
 done
+wait
+nok=$(grep -l '^ok$' "$STAT"/* 2>/dev/null | wc -l)
+failed=($(grep -l '^FAILED$' "$STAT"/* 2>/dev/null | xargs -r -n1 basename | sort -n))
+nfail=${#failed[@]}
 echo "$(date +%T) $name: $nok ok, $nfail failed${failed:+ (lines: ${failed[*]})}; logs in $LOG"
 echo RUN_SUBMIT_DONE

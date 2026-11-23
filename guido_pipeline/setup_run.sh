@@ -145,6 +145,10 @@ for f in "$D"/climate_qdm/climateQDMDelta_condor.sh "$D"/climate_qdm/climateQDMA
     grep -q -E '^[^#]*invertlat' "$f" && echo "WARNING: invertlat left in $(basename "$f")"
 done
 
+# 10. pr: climate imprint adapted to our reference and years (temporary files, latitude flip, ERA5 climatology,
+#     q90 and wet-day probability instead of his CERRA files, hole filling at 0.25 deg, tasks by blocks of years)
+[ "$VAR" = pr ] && bash "$(dirname "$(readlink -f "$0")")/patch_pr_imprint.sh" "$D" "$first_run_year" "${LASTYEAR[$RUN]}"
+
 echo "run folder: $D"
 echo "QDM periods:"; sort -u -k1,2 "$Q" | awk '{print $1, $2}' | sort -u
 grep -nE '^(REANALYSIS|VARNAME|DOMAIN|MODEL|SCENARIO|CAL_START|CAL_END|GLOBAL_START|GLOBAL_END|PATH_FILES|PATH_CONDA)=' "$D/params.sh"

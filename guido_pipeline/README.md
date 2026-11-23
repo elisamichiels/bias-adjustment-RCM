@@ -108,3 +108,21 @@ wet-day frequency of the seasonal files corrected before the QDM. QDM: qdm_delta
 smooth_delta (run on JEO-desk), qdm_applydelta, postprocess1_qdm (4 seasonal files), postprocess2_qdm (outliers
 invalidated and refilled on short periods: `qdm_noholes`), postprocess3_qdm (12 monthly files), mergetime_monthly_qdm.
 For us: step 0 run with ERA5 produces the reference climatology, q90 and wet-day files itself (no CERRA files needed).
+
+## pr climate imprint in our runs (`patch_pr_imprint.sh`, called by `setup_run.sh` step 10; read 23 Nov 2026)
+
+Order: `climatology` (4 seasons) -> `imprint` (365 days x 5 blocks of consecutive years = 1825 tasks) ->
+`climatology2` (4 extended seasonal files, merges the imprint itself) -> `fix_drizzle` (4 seasons) -> QDM.
+- His scripts write fixed names in `TMP="/tmp"` (the imprint even runs `rm -rf /tmp/z* /tmp/w* ...`): private
+  exported folder instead (EOS for the climatology and merges, /tmp for the imprint), so tasks can run in parallel
+  (`PARALLEL=N bash run_submit.sh ...`).
+- `-invertlat` after the R outputs removed (our inputs are north -> south, as in the QDM).
+- His precomputed CERRA files (season, anomaly, smoothed climatology, q90) are read from `out/ci/` where the
+  climatology step writes them; the wet-day probability (his CERRA files: `cdo divc,<days> -timsum -gec,0.1` on the
+  extended season, made by hand) is computed at the end of the climatology step from ERA5 1981-2014.
+- `fill_holes.R`: kernel (0.1, 0.1) deg = 1 x 1 cell at 0.25 deg (terra focalMat), so the values > 5 x q90 were never
+  refilled; (0.25, 0.3) = 3 x 3. Smoothing of the climatologies: ERA5 (1, 0.1) = 1 x 1 (none), EC-Earth3 (1, 2.7) = 7 x 7.
+- The imprint sets a yearly time axis on each output: blocks of years must be consecutive (1981-1997, 1998-2014 and
+  three blocks of the run), never across the gap between 2014 and the run.
+- `fix_drizzle`: per cell, values below the quantile (1 - pwet of ERA5) of the WHOLE imprint series (calibration and
+  run pooled) are set to 0, so that the pooled wet-day frequency (>= 0.1 mm) is that of ERA5.
