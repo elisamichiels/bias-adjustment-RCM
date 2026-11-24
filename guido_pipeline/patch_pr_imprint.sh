@@ -36,6 +36,11 @@ for f in climateClimatology_condor.sh climateImprint_condor.sh climateClimatolog
     sed -i 's|^DEBUG rm -rf "${TMP}"/\*\.nc|rm -rf "${TMP}"/*.nc|' "$F"
 done
 
+# 1b. R without --vanilla (fill_holes.R in the imprint) restores ./.RData at start and saves it at the end, in the
+#     folder shared by all tasks: two tasks in parallel corrupted it and every later R failed at start (load:
+#     "SET_STRING_ELT() must be a 'CHARSXP'"), so no filled.nc (Nov 2026)
+sed -i -E '/^\s*#/! s/CMD BATCH "/CMD BATCH --vanilla "/' "$CI"/*.sh
+
 # 2. no latitude flip of the R outputs
 sed -i -E '/^\s*#/! s/ -invertlat / /' "$CI"/*.sh
 
@@ -89,6 +94,7 @@ echo "imprint: $(wc -l < "$T") tasks, blocks: $(echo $BL)"
 echo "files expected per day by the merges:"; grep -h -o '"${expected_days}" \* [0-9]*' "$CI/climateClimatology_condor2.sh" "$CI/climateMergetimeImprint_condor.sh"
 echo "TMP lines:"; grep -n '^TMP=' "$CI"/*.sh
 echo "exported private folders:"; grep -c 'export PRIVATE_TMP=$(mktemp' "$CI"/climate*.sh
+echo "R calls without --vanilla:"; grep -n -E '^[^#]*CMD BATCH' "$CI"/*.sh | grep -v -- '--vanilla' || echo "  none"
 echo "DEBUG lines left:"; grep -n '^DEBUG' "$CI"/*.sh || echo "  none"
 echo "invertlat left (code lines):"; grep -n -E '^[^#]*invertlat' "$CI"/*.sh || echo "  none"
 echo "CERRA folder left (code lines):"; grep -n -E '^[^#]*CERRA/downscaling' "$CI"/*.sh "$D/params.sh" || echo "  none"

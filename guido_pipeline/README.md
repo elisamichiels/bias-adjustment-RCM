@@ -126,5 +126,7 @@ Order: `climatology` (4 seasons) -> `imprint` (365 days x 5 blocks of consecutiv
   blur it over 75 km).
 - The imprint sets a yearly time axis on each output: blocks of years must be consecutive (1981-1997, 1998-2014 and
   three blocks of the run), never across the gap between 2014 and the run.
+- R is called with `--vanilla` everywhere: without it `fill_holes.R` restored and saved `./.RData` in the folder shared
+  by all tasks, and two parallel tasks corrupted it (every later R failed at start).
 - `fix_drizzle`: per cell, values below the quantile (1 - pwet of ERA5) of the WHOLE imprint series (calibration and
   run pooled) are set to 0, so that the pooled wet-day frequency (>= 0.1 mm) is that of ERA5.
